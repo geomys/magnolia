@@ -1,0 +1,2 @@
+# https://witness-network.org/log-list-format/
+logs/v0
