@@ -42,6 +42,7 @@ var tuscoloConfigFiles = []string{
 	"/etc/systemd/system/pkg-geomys-dev.service",
 	"/etc/systemd/system/plc-replica.service",
 	"/etc/prometheus/prometheus.yml",
+	"/etc/prometheus/rules.yml",
 }
 
 func main() {
