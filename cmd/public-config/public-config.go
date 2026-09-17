@@ -29,6 +29,11 @@ var bothConfigFiles = []string{
 	"/usr/local/bin/zfs-textfile",
 	"/etc/systemd/system/zfs-textfile.service",
 	"/etc/systemd/system/zfs-textfile.timer",
+	"/etc/default/prometheus-node-exporter",
+	"/etc/systemd/system/prometheus-node-exporter.service.d/slabinfo.conf",
+	"/etc/systemd/system/memcg-reclaim@.service",
+	"/etc/systemd/system/memcg-reclaim@skylight.timer",
+	"/usr/local/bin/memcg-reclaim",
 }
 
 var tuscoloConfigFiles = []string{
