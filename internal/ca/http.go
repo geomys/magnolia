@@ -134,7 +134,7 @@ func writeError(w http.ResponseWriter, err acmeerrors.Error) {
 	// TODO: check if headers have already been written before.
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Del("Content-Length")
-	w.Header().Del("Cache-Control")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(err.Status())
 	fields := map[string]any{
 		"type":   err.Type(),

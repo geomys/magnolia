@@ -1,0 +1,101 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+
+# The url header parameter must match the request URL.
+POST-as-GET $account.url
+sign header url "https://magnolia.test/acme/account/other"
+error == unauthorized
+
+POST-as-GET $account.url
+sign header url "https://example.com/acme/account/other"
+error == unauthorized
+
+# URL integrity includes the query string.
+POST-as-GET $account.url?query=1
+sign header url "$account.url"
+error == unauthorized
+
+# The signature must be by the account key.
+POST-as-GET $account.url
+sign key account2
+error == unauthorized
+
+POST $dir.newAccount as account3
+sign key account2
+payload {}
+error == unauthorized
+
+# Only ML-DSA algorithms are supported.
+POST-as-GET $account.url
+sign header alg "ES256"
+error == badSignatureAlgorithm
+$body.algorithms == ["ML-DSA-44","ML-DSA-65","ML-DSA-87"]
+
+POST-as-GET $account.url
+sign header alg "none"
+error == badSignatureAlgorithm
+
+POST-as-GET $account.url
+sign header alg "ML-DSA-65"
+error == malformed
+
+POST $dir.newAccount as account3
+sign header alg "ML-DSA-65"
+payload {}
+error == badPublicKey
+
+# Unknown and non-string header parameters are rejected.
+POST-as-GET $account.url
+sign header alg 1
+error == malformed
+
+POST-as-GET $account.url
+sign header crit ["url"]
+error == malformed
+
+# Exactly one of kid and jwk is required.
+POST-as-GET $account.url
+sign header jwk $account.jwk
+error == malformed
+
+POST-as-GET $account.url
+sign header kid ""
+error == malformed
+
+# A syntactically valid JWK with an invalid public key is rejected.
+POST $dir.newAccount as account3
+sign header jwk {"kty":"AKP","alg":"ML-DSA-44","pub":"AAAA"}
+payload {}
+error == badPublicKey
+
+# A null url is a missing url, which is a mismatch.
+POST-as-GET $account.url
+sign header url null
+error == unauthorized
+
+# Requests must be JWS with the right Content-Type.
+POST $dir.newAccount
+reqheader Content-Type application/json
+payload {}
+error == malformed
+$code == 415
+
+POST $dir.newAccount
+reqheader Content-Type
+payload {}
+error == malformed
+$code == 415
+
+POST $dir.newAccount
+reqheader Content-Type application/jose+json; charset=utf-8
+payload {"onlyReturnExisting": true}
+$code == 200
+
+POST $dir.newAccount
+body not a JWS
+error == malformed
+
+POST $dir.newAccount
+body {"protected":"","payload":"","signature":""}
+error == malformed

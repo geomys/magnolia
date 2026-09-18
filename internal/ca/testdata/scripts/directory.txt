@@ -1,0 +1,29 @@
+# The directory and newNonce can be fetched without authentication.
+# The harness fetches it before the first case; this fetches it again.
+
+GET $dirURL
+$body.newNonce ~ ^https://
+$body.newAccount ~ ^https://
+$body.keyChange ~ ^https://
+$body.revokeCert !exists
+$body.newAccount == $dir.newAccount
+$body.keyChange == $dir.keyChange
+
+HEAD $dirURL
+$header.Content-Type == application/json
+
+POST $dir.newAccount
+payload {}
+$code == 201
+
+# POST-as-GET works for the directory too.
+POST-as-GET $dirURL
+$body.newAccount == $dir.newAccount
+
+POST-as-GET $dir.newNonce
+$code == 200
+
+# A directory request must not carry a payload.
+POST $dirURL
+payload {}
+error == malformed

@@ -1,0 +1,111 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+$header.Location ~ ^https://magnolia.test/acme/account/
+$body.status == valid
+capture acct = $header.Location
+
+POST-as-GET $account.url
+$body.status == valid
+
+# A second newAccount with the same key returns the existing account.
+POST $dir.newAccount
+payload {}
+$code == 200
+$header.Location == $acct
+$body.status == valid
+
+POST $dir.newAccount
+payload {"onlyReturnExisting": true}
+$code == 200
+$header.Location == $acct
+
+# The original account URL still works after both lookups.
+POST-as-GET $acct
+$body.status == valid
+
+POST $acct
+payload {}
+$body.status == valid
+
+# onlyReturnExisting with an unknown key does not create an account.
+POST $dir.newAccount as account2
+payload {"onlyReturnExisting": true}
+error == accountDoesNotExist
+
+POST $dir.newAccount as account2
+payload {}
+$code == 201
+$header.Location != $account.url
+
+# An account update signed by a different account is rejected.
+POST $account.url as account2
+payload {"contact": ["mailto:account2@example.org"]}
+error == unauthorized
+
+POST-as-GET $account.url as account2
+error == unauthorized
+
+# A kid for an account that does not exist.
+POST-as-GET $account.url
+sign kid
+sign header kid "https://magnolia.test/acme/account/does-not-exist"
+error == accountDoesNotExist
+
+# newAccount requires an embedded JWK, everything else a kid.
+POST $dir.newAccount
+sign kid
+payload {}
+error == malformed
+
+POST-as-GET $account.url
+sign jwk
+error == malformed
+
+# Malformed payloads.
+POST-as-GET $dir.newAccount as account3
+error == malformed
+
+POST $dir.newAccount as account3
+payload {
+error == malformed
+
+POST $account.url
+payload {
+error == malformed
+
+# Valid JSON with the wrong field types is also rejected.
+POST $dir.newAccount as account3
+payload {"onlyReturnExisting": "true"}
+error == malformed
+
+POST $account.url
+payload {"status": 42}
+error == malformed
+
+# Failed requests neither create an account nor change the existing one.
+POST $dir.newAccount as account3
+payload {"onlyReturnExisting": true}
+error == accountDoesNotExist
+
+POST-as-GET $acct
+$body.status == valid
+
+# Every ML-DSA parameter set is accepted as an account key.
+key account65 ML-DSA-65
+
+POST $dir.newAccount as account65
+payload {}
+$code == 201
+
+key account87 ML-DSA-87
+
+POST $dir.newAccount as account87
+payload {}
+$code == 201
+
+POST-as-GET $account65.url as account65
+$body.status == valid
+
+POST-as-GET $account87.url as account87
+$body.status == valid
