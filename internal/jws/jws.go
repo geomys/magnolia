@@ -74,6 +74,30 @@ type mldsaJWK struct {
 	Pub []byte `json:"pub"`
 }
 
+// ParseJWK decodes an ML-DSA JWK (RFC 9964).
+func ParseJWK(data []byte) (*mldsa.PublicKey, acmeerrors.Error) {
+	var k mldsaJWK
+	if err := json.Unmarshal(data, &k, jsonOptions); err != nil {
+		return nil, acmeerrors.New("badPublicKey", 400, "failed to parse JWK:", err.Error())
+	}
+	return k.publicKey()
+}
+
+func (k *mldsaJWK) publicKey() (*mldsa.PublicKey, acmeerrors.Error) {
+	if k.KTY != "AKP" {
+		return nil, acmeerrors.New("badPublicKey", 400, "JWK KTY must be AKP")
+	}
+	params, err := algToParameters(k.Alg)
+	if err != nil {
+		return nil, err
+	}
+	pub, e := mldsa.NewPublicKey(params, k.Pub)
+	if e != nil {
+		return nil, acmeerrors.New("badPublicKey", 400, "invalid public key:", e.Error())
+	}
+	return pub, nil
+}
+
 // Unverified is a parsed JWS whose signature has not been checked yet.
 // Callers select the key with KID or JWK, and then call Verify.
 type Unverified struct {
@@ -119,15 +143,12 @@ func Parse(jws []byte) (*Unverified, acmeerrors.Error) {
 		kid:       h.KID,
 	}
 	if h.JWK != nil {
-		if h.JWK.KTY != "AKP" {
-			return nil, acmeerrors.New("badPublicKey", 400, "JWK KTY must be AKP")
-		}
 		if h.JWK.Alg != h.Alg {
 			return nil, acmeerrors.New("badPublicKey", 400, "JWK alg must match protected header alg")
 		}
-		pub, err := mldsa.NewPublicKey(params, h.JWK.Pub)
+		pub, err := h.JWK.publicKey()
 		if err != nil {
-			return nil, acmeerrors.New("badPublicKey", 400, "invalid public key:", err.Error())
+			return nil, err
 		}
 		u.jwk = pub
 	}
@@ -199,7 +220,7 @@ func algToParameters(alg string) (mldsa.Parameters, acmeerrors.Error) {
 
 // JWKThumbprint computes the base64url-encoded SHA-256 JWK Thumbprint of a
 // public key according to RFC 7638 and RFC 9964.
-func JWKThumbprint(pub *mldsa.PublicKey) (string, error) {
+func JWKThumbprint(pub *mldsa.PublicKey) string {
 	h := sha256.New()
 	h.Write([]byte(`{"alg":"`))
 	switch pub.Parameters() {
@@ -210,10 +231,10 @@ func JWKThumbprint(pub *mldsa.PublicKey) (string, error) {
 	case mldsa.MLDSA87():
 		h.Write([]byte(`ML-DSA-87`))
 	default:
-		return "", errors.New("unsupported algorithm")
+		panic("unsupported ML-DSA parameters")
 	}
 	h.Write([]byte(`","kty":"AKP","pub":"`))
 	h.Write([]byte(base64.RawURLEncoding.EncodeToString(pub.Bytes())))
 	h.Write([]byte(`"}`))
-	return base64.RawURLEncoding.EncodeToString(h.Sum(nil)), nil
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 }

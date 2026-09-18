@@ -12,18 +12,10 @@ import (
 	"geomys.org/magnolia/internal/jws"
 )
 
-func (ca *CA) Handler() http.Handler {
-	postPrefix := "POST " + ca.writePrefix.Path
-	getPrefix := "GET " + ca.writePrefix.Path
-	mux := http.NewServeMux()
-	mux.Handle(postPrefix+"/directory", acmeMiddleware(ca, ca.handleDirectory, withKID))
-	mux.Handle(getPrefix+"/directory", plainGETMiddleware(ca, ca.handleDirectory))
-	mux.Handle(postPrefix+"/nonce", acmeMiddleware(ca, ca.handleNewNonce, withKID))
-	mux.Handle(getPrefix+"/nonce", plainGETMiddleware(ca, ca.handleNewNonce))
-	return http.MaxBytesHandler(mux, 1<<16) // 64 KiB
-}
-
-type acmeHandler func(w http.ResponseWriter, payload []byte, r *http.Request) (any, acmeerrors.Error)
+// acmeHandler processes a verified request and returns the HTTP status code
+// and the JSON body (or nil for an empty body). Handlers may set response
+// headers on w, but must not write the status or body themselves.
+type acmeHandler func(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error)
 
 const withKID = true
 const withJWK = false
@@ -64,12 +56,19 @@ func acmeMiddleware(ca *CA, next acmeHandler, useKID bool) http.Handler {
 				writeError(w, err)
 				return
 			}
-			p, ok := ca.accounts.Load(kid)
+			var ok bool
+			ca.accountMu.RLock()
+			pub, ok = ca.accounts[kid]
+			deactivated := ca.accountDeactivated[kid]
+			ca.accountMu.RUnlock()
 			if !ok {
 				writeError(w, acmeerrors.New("accountDoesNotExist", 400, "unknown account"))
 				return
 			}
-			pub = p.(*mldsa.PublicKey)
+			if deactivated {
+				writeError(w, acmeerrors.New("unauthorized", 401, "account is deactivated"))
+				return
+			}
 			r = r.WithContext(context.WithValue(r.Context(), kidContextKey, kid))
 		} else {
 			pub, err = u.JWK()
@@ -93,12 +92,12 @@ func acmeMiddleware(ca *CA, next acmeHandler, useKID bool) http.Handler {
 			writeError(w, err)
 			return
 		}
-		resp, err := next(w, j.Payload, r)
+		status, resp, err := next(w, j.Payload, r)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeResponse(w, resp)
+		writeResponse(w, status, resp)
 	})
 }
 
@@ -107,25 +106,27 @@ func plainGETMiddleware(ca *CA, next acmeHandler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Replay-Nonce", ca.nonceIssuer.Mint())
 		w.Header().Set("Link", `<`+ca.writePrefix.String()+`/directory>;rel="index"`)
-		resp, err := next(w, nil, r)
+		status, resp, err := next(w, nil, r)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeResponse(w, resp)
+		writeResponse(w, status, resp)
 	})
 }
 
-func writeResponse(w http.ResponseWriter, resp any) {
+func writeResponse(w http.ResponseWriter, status int, resp any) {
 	if resp == nil {
+		w.WriteHeader(status)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	out, err := json.Marshal(resp)
 	if err != nil {
 		writeError(w, acmeerrors.Internal("failed to encode response: %w", err))
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	w.Write(out)
 }
 

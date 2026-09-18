@@ -575,11 +575,7 @@ func TestJWKThumbprint(t *testing.T) {
 	for _, params := range allParams {
 		t.Run(params.String(), func(t *testing.T) {
 			v, sk := loadVector(t, params)
-			got, err := jws.JWKThumbprint(sk.PublicKey())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != v.JWK.KID {
+			if got := jws.JWKThumbprint(sk.PublicKey()); got != v.JWK.KID {
 				t.Errorf("thumbprint %q, want %q", got, v.JWK.KID)
 			}
 		})
