@@ -12,6 +12,8 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+
+	"geomys.org/magnolia/internal/acmeerrors"
 )
 
 var jsonOptions = json.JoinOptions(
@@ -72,20 +74,20 @@ type mldsaJWK struct {
 	Pub []byte `json:"pub"`
 }
 
-func PeekKID(jws []byte) (string, error) {
+func PeekKID(jws []byte) (string, acmeerrors.Error) {
 	var f flattenedJWS
 	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
-		return "", err
+		return "", acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
 	}
 	var h header
 	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
-		return "", err
+		return "", acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
 	}
 	if h.JWK != nil {
-		return "", errors.New("JWK is not allowed in this context")
+		return "", acmeerrors.New("malformed", 400, "JWK is not allowed in this context")
 	}
 	if h.KID == "" {
-		return "", errors.New("KID is required in this context")
+		return "", acmeerrors.New("malformed", 400, "KID is required in this context")
 	}
 	return h.KID, nil
 }
@@ -96,42 +98,34 @@ type JWS struct {
 	Payload []byte
 }
 
-type UnsupportedAlgorithmError struct {
-	Alg string
-}
-
-func (e *UnsupportedAlgorithmError) Error() string {
-	return "unsupported algorithm: " + e.Alg
-}
-
-func Verify(jws []byte, pub *mldsa.PublicKey) (*JWS, error) {
+func Verify(jws []byte, pub *mldsa.PublicKey) (*JWS, acmeerrors.Error) {
 	var f flattenedJWS
 	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
-		return nil, err
+		return nil, acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
 	}
 	var h header
 	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
-		return nil, err
+		return nil, acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
 	}
 	if h.JWK != nil {
-		return nil, errors.New("JWK is not allowed in this context")
+		return nil, acmeerrors.New("malformed", 400, "JWK is not allowed in this context")
 	}
 	if h.KID == "" {
-		return nil, errors.New("KID is required in this context")
+		return nil, acmeerrors.New("malformed", 400, "KID is required in this context")
 	}
 	params, err := algToParameters(h.Alg)
 	if err != nil {
 		return nil, err
 	}
 	if pub.Parameters() != params {
-		return nil, errors.New("public key parameters do not match algorithm")
+		return nil, acmeerrors.New("badPublicKey", 400, "public key parameters do not match algorithm")
 	}
 	var signed []byte
 	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Protected)...)
 	signed = append(signed, '.')
 	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Payload)...)
 	if err := mldsa.Verify(pub, signed, f.Signature, nil); err != nil {
-		return nil, err
+		return nil, acmeerrors.New("unauthorized", 403, "signature verification failed:", err.Error())
 	}
 	return &JWS{
 		Nonce:   h.Nonce,
@@ -140,7 +134,7 @@ func Verify(jws []byte, pub *mldsa.PublicKey) (*JWS, error) {
 	}, nil
 }
 
-func algToParameters(alg string) (mldsa.Parameters, error) {
+func algToParameters(alg string) (mldsa.Parameters, acmeerrors.Error) {
 	switch alg {
 	case "ML-DSA-44":
 		return mldsa.MLDSA44(), nil
@@ -149,7 +143,9 @@ func algToParameters(alg string) (mldsa.Parameters, error) {
 	case "ML-DSA-87":
 		return mldsa.MLDSA87(), nil
 	default:
-		return mldsa.Parameters{}, &UnsupportedAlgorithmError{Alg: alg}
+		err := acmeerrors.New("badSignatureAlgorithm", 400, "unsupported algorithm:", alg)
+		err = err.WithField("algorithms", []string{"ML-DSA-44", "ML-DSA-65", "ML-DSA-87"})
+		return mldsa.Parameters{}, err
 	}
 }
 
@@ -160,53 +156,41 @@ type JWSWithPublicKey struct {
 	Payload   []byte
 }
 
-type InvalidPublicKeyError struct {
-	Err error
-}
-
-func (e *InvalidPublicKeyError) Error() string {
-	return "invalid public key: " + e.Err.Error()
-}
-
-func (e *InvalidPublicKeyError) Unwrap() error {
-	return e.Err
-}
-
-func VerifyWithJWK(jws []byte) (*JWSWithPublicKey, error) {
+func VerifyWithJWK(jws []byte) (*JWSWithPublicKey, acmeerrors.Error) {
 	var f flattenedJWS
 	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
-		return nil, err
+		return nil, acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
 	}
 	var h header
 	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
-		return nil, err
+		return nil, acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
 	}
 	if h.JWK == nil {
-		return nil, errors.New("JWK is required in this context")
+		return nil, acmeerrors.New("malformed", 400, "JWK is required in this context")
 	}
 	if h.KID != "" {
-		return nil, errors.New("KID is not allowed in this context")
+		return nil, acmeerrors.New("malformed", 400, "KID is not allowed in this context")
 	}
-	params, err := algToParameters(h.Alg)
-	if err != nil {
-		return nil, err
+	params, aerr := algToParameters(h.Alg)
+	if aerr != nil {
+		return nil, aerr
 	}
 	if h.JWK.KTY != "AKP" {
-		return nil, errors.New("JWK KTY must be AKP")
+		return nil, acmeerrors.New("badPublicKey", 400, "JWK KTY must be AKP")
 	}
 	if h.JWK.Alg != h.Alg {
-		return nil, errors.New("JWK alg must match protected header alg")
+		return nil, acmeerrors.New("badPublicKey", 400, "JWK alg must match protected header alg")
 	}
 	pub, err := mldsa.NewPublicKey(params, h.JWK.Pub)
 	if err != nil {
-		return nil, &InvalidPublicKeyError{Err: err}
+		return nil, acmeerrors.New("badPublicKey", 400, "invalid public key:", err.Error())
 	}
 	var signed []byte
 	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Protected)...)
 	signed = append(signed, '.')
 	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Payload)...)
 	if err := mldsa.Verify(pub, signed, f.Signature, nil); err != nil {
-		return nil, err
+		return nil, acmeerrors.New("unauthorized", 403, "signature verification failed:", err.Error())
 	}
 	return &JWSWithPublicKey{
 		PublicKey: pub,

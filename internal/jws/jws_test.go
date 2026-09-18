@@ -6,11 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"geomys.org/magnolia/internal/acmeerrors"
 	"geomys.org/magnolia/internal/jws"
 )
 
@@ -501,7 +501,7 @@ func TestReject(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var err error
+			var err acmeerrors.Error
 			if tt.jwk {
 				_, err = jws.VerifyWithJWK(tt.body)
 			} else {
@@ -520,15 +520,22 @@ func TestReject(t *testing.T) {
 func TestErrorTypes(t *testing.T) {
 	v44, sk44 := loadVector(t, mldsa.MLDSA44())
 	_, err := jws.Verify(sign(t, sk44, `{"alg":"ES256","kid":"k"}`, ""), sk44.PublicKey())
-	var unsupported *jws.UnsupportedAlgorithmError
-	if !errors.As(err, &unsupported) || unsupported.Alg != "ES256" {
-		t.Errorf("Verify returned %v, want UnsupportedAlgorithmError for ES256", err)
+	if err == nil {
+		t.Fatal("Verify accepted ES256")
+	}
+	if err.Type() != "urn:ietf:params:acme:error:badSignatureAlgorithm" || err.Status() != 400 {
+		t.Errorf("Verify returned %v (status %d), want badSignatureAlgorithm with status 400", err, err.Status())
+	}
+	if algs, ok := err.Fields()["algorithms"].([]string); !ok || len(algs) != 3 {
+		t.Errorf("Verify error fields %v, want algorithms list", err.Fields())
 	}
 
 	_, err = jws.VerifyWithJWK(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":{"kty":"AKP","alg":"ML-DSA-44","pub":"AAAA"}}`, ""))
-	var invalidKey *jws.InvalidPublicKeyError
-	if !errors.As(err, &invalidKey) || invalidKey.Unwrap() == nil {
-		t.Errorf("VerifyWithJWK returned %v, want InvalidPublicKeyError", err)
+	if err == nil {
+		t.Fatal("VerifyWithJWK accepted invalid public key")
+	}
+	if err.Type() != "urn:ietf:params:acme:error:badPublicKey" || err.Status() != 400 {
+		t.Errorf("VerifyWithJWK returned %v (status %d), want badPublicKey with status 400", err, err.Status())
 	}
 
 	_, err = jws.VerifyWithJWK(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":`+publicJWK(v44)+`}`, ""))

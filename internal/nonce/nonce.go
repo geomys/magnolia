@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 	"uuid"
+
+	"geomys.org/magnolia/internal/acmeerrors"
 )
 
 type Issuer struct {
@@ -65,23 +67,23 @@ func newUUIDv7(t time.Time) uuid.UUID {
 	return u
 }
 
-func (i *Issuer) Verify(nonce string) (uuid.UUID, error) {
+func (i *Issuer) Verify(nonce string) (uuid.UUID, acmeerrors.Error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(nonce)
 	if err != nil {
-		return uuid.Nil(), err
+		return uuid.Nil(), acmeerrors.New("badNonce", 400, "failed to decode nonce:", err.Error())
 	}
 	if len(decoded) != 17+16 {
-		return uuid.Nil(), errors.New("invalid nonce length")
+		return uuid.Nil(), acmeerrors.New("badNonce", 400, "invalid nonce length")
 	}
 	if decoded[0] != 0x01 {
-		return uuid.Nil(), errors.New("invalid nonce version")
+		return uuid.Nil(), acmeerrors.New("badNonce", 400, "invalid nonce version")
 	}
 	h := hmac.New(sha256.New, i.key[:])
 	h.Write([]byte("magnolia-ca.com/nonce"))
 	h.Write(decoded[:17])
 	expected := h.Sum(nil)
 	if !hmac.Equal(expected[:16], decoded[17:]) {
-		return uuid.Nil(), errors.New("invalid nonce HMAC")
+		return uuid.Nil(), acmeerrors.New("badNonce", 400, "invalid nonce HMAC")
 	}
 	return uuid.UUID(decoded[1:17]), nil
 }
@@ -119,7 +121,7 @@ func NewSpent(i *Issuer, size int) *Spent {
 	}
 }
 
-func (s *Spent) Spend(nonce string) error {
+func (s *Spent) Spend(nonce string) acmeerrors.Error {
 	id, err := s.i.Verify(nonce)
 	if err != nil {
 		return err
@@ -128,10 +130,10 @@ func (s *Spent) Spend(nonce string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id.Compare(s.floor) <= 0 {
-		return errors.New("nonce is too old")
+		return acmeerrors.New("badNonce", 400, "nonce is too old")
 	}
 	if _, ok := s.used[id]; ok {
-		return errors.New("nonce has already been spent")
+		return acmeerrors.New("badNonce", 400, "nonce has already been spent")
 	}
 	s.used[id] = struct{}{}
 	s.push(id)
