@@ -43,60 +43,59 @@ func acmeMiddleware(ca *CA, next acmeHandler, useKID bool) http.Handler {
 			writeError(w, acmeerrors.New("malformed", 415, "invalid Content-Type"))
 			return
 		}
-		body, err := io.ReadAll(r.Body)
-		if _, ok := err.(*http.MaxBytesError); ok {
+		body, readErr := io.ReadAll(r.Body)
+		if _, ok := readErr.(*http.MaxBytesError); ok {
 			writeError(w, acmeerrors.New("malformed", 413, "request body too large"))
 			return
-		} else if err != nil {
+		} else if readErr != nil {
 			// If the body can't be read, writing a response is futile.
 			w.WriteHeader(400)
 			return
 		}
-		var payload []byte
-		var nonce, url string
+		u, err := jws.Parse(body)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		var pub *mldsa.PublicKey
 		if useKID {
-			kid, err := jws.PeekKID(body)
+			kid, err := u.KID()
 			if err != nil {
 				writeError(w, err)
 				return
 			}
-			pub, ok := ca.accounts.Load(kid)
+			p, ok := ca.accounts.Load(kid)
 			if !ok {
 				writeError(w, acmeerrors.New("accountDoesNotExist", 400, "unknown account"))
 				return
 			}
-			j, err := jws.Verify(body, pub.(*mldsa.PublicKey))
-			if err != nil {
-				writeError(w, err)
-				return
-			}
+			pub = p.(*mldsa.PublicKey)
 			r = r.WithContext(context.WithValue(r.Context(), kidContextKey, kid))
-			payload = j.Payload
-			nonce = j.Nonce
-			url = j.URL
 		} else {
-			j, err := jws.VerifyWithJWK(body)
+			pub, err = u.JWK()
 			if err != nil {
 				writeError(w, err)
 				return
 			}
-			r = r.WithContext(context.WithValue(r.Context(), jwkContextKey, j.PublicKey))
-			payload = j.Payload
-			nonce = j.Nonce
-			url = j.URL
+			r = r.WithContext(context.WithValue(r.Context(), jwkContextKey, pub))
 		}
-		reqURL := ca.writePrefix.Scheme + "://" + ca.writePrefix.Host + r.URL.RequestURI()
-		if url != reqURL {
-			writeError(w, acmeerrors.New("unauthorized", 403, "JWS header url mismatch"))
-			return
-		}
-		if err := ca.nonceSpent.Spend(nonce); err != nil {
+		j, err := u.Verify(pub)
+		if err != nil {
 			writeError(w, err)
 			return
 		}
-		resp, aerr := next(w, payload, r)
-		if aerr != nil {
-			writeError(w, aerr)
+		reqURL := ca.writePrefix.Scheme + "://" + ca.writePrefix.Host + r.URL.RequestURI()
+		if j.URL != reqURL {
+			writeError(w, acmeerrors.New("unauthorized", 403, "JWS header url mismatch"))
+			return
+		}
+		if err := ca.nonceSpent.Spend(j.Nonce); err != nil {
+			writeError(w, err)
+			return
+		}
+		resp, err := next(w, j.Payload, r)
+		if err != nil {
+			writeError(w, err)
 			return
 		}
 		writeResponse(w, resp)

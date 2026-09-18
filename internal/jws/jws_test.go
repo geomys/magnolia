@@ -101,6 +101,42 @@ func sign(t *testing.T, sk *mldsa.PrivateKey, protected, payload string) []byte 
 	return flattened(signParts(t, sk, protected, payload))
 }
 
+// verifyKID parses body, requires a kid, and verifies it with pub, mirroring
+// how the CA handles kid-authenticated requests.
+func verifyKID(body []byte, pub *mldsa.PublicKey) (string, *jws.JWS, acmeerrors.Error) {
+	u, err := jws.Parse(body)
+	if err != nil {
+		return "", nil, err
+	}
+	kid, err := u.KID()
+	if err != nil {
+		return "", nil, err
+	}
+	r, err := u.Verify(pub)
+	if err != nil {
+		return "", nil, err
+	}
+	return kid, r, nil
+}
+
+// verifyJWK parses body, requires an embedded JWK, and verifies it with that
+// key, mirroring how the CA handles jwk-authenticated requests.
+func verifyJWK(body []byte) (*mldsa.PublicKey, *jws.JWS, acmeerrors.Error) {
+	u, err := jws.Parse(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	pub, err := u.JWK()
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := u.Verify(pub)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pub, r, nil
+}
+
 var allParams = []mldsa.Parameters{mldsa.MLDSA44(), mldsa.MLDSA65(), mldsa.MLDSA87()}
 
 // TestRFC9964Vectors verifies the RFC 9964 Appendix A examples verbatim, after
@@ -130,7 +166,7 @@ func TestRFC9964Vectors(t *testing.T) {
 			}
 			body := flattened(parts[0], parts[1], parts[2])
 
-			r, err := jws.Verify(body, pub)
+			kid, r, err := verifyKID(body, pub)
 			if err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
@@ -140,17 +176,12 @@ func TestRFC9964Vectors(t *testing.T) {
 			if r.Nonce != "" || r.URL != "" {
 				t.Errorf("nonce %q url %q, want empty", r.Nonce, r.URL)
 			}
-
-			kid, err := jws.PeekKID(body)
-			if err != nil {
-				t.Fatalf("PeekKID: %v", err)
-			}
 			if kid != v.JWK.KID {
 				t.Errorf("kid %q, want %q", kid, v.JWK.KID)
 			}
 
-			if _, err := jws.VerifyWithJWK(body); err == nil {
-				t.Error("VerifyWithJWK accepted a kid-authenticated JWS")
+			if _, _, err := verifyJWK(body); err == nil {
+				t.Error("JWK accepted a kid-authenticated JWS")
 			}
 
 			for _, other := range allParams {
@@ -158,14 +189,14 @@ func TestRFC9964Vectors(t *testing.T) {
 					continue
 				}
 				_, otherKey := loadVector(t, other)
-				if _, err := jws.Verify(body, otherKey.PublicKey()); err == nil {
+				if _, _, err := verifyKID(body, otherKey.PublicKey()); err == nil {
 					t.Errorf("Verify accepted the %s JWS with a %s key", params, other)
 				}
 			}
 
 			corrupted := []byte(parts[2])
 			corrupted[len(corrupted)/2] ^= 1
-			if _, err := jws.Verify(flattened(parts[0], parts[1], string(corrupted)), pub); err == nil {
+			if _, _, err := verifyKID(flattened(parts[0], parts[1], string(corrupted)), pub); err == nil {
 				t.Error("Verify accepted a corrupted signature")
 			}
 		})
@@ -197,11 +228,11 @@ func TestRFC8555Examples(t *testing.T) {
      }`
 		body := sign(t, sk44, protected, payload)
 
-		r, err := jws.VerifyWithJWK(body)
+		pub, r, err := verifyJWK(body)
 		if err != nil {
-			t.Fatalf("VerifyWithJWK: %v", err)
+			t.Fatalf("Verify: %v", err)
 		}
-		if !r.PublicKey.Equal(pub44) {
+		if !pub.Equal(pub44) {
 			t.Error("returned public key does not match the JWK")
 		}
 		if r.Nonce != "6S8IqOGY7eL2lsGoTZYifg" {
@@ -214,11 +245,8 @@ func TestRFC8555Examples(t *testing.T) {
 			t.Errorf("payload %q", r.Payload)
 		}
 
-		if _, err := jws.Verify(body, pub44); err == nil {
-			t.Error("Verify accepted a jwk-authenticated JWS")
-		}
-		if _, err := jws.PeekKID(body); err == nil {
-			t.Error("PeekKID accepted a jwk-authenticated JWS")
+		if _, _, err := verifyKID(body, pub44); err == nil {
+			t.Error("KID accepted a jwk-authenticated JWS")
 		}
 	})
 
@@ -237,16 +265,12 @@ func TestRFC8555Examples(t *testing.T) {
      }`
 		body := sign(t, sk44, protected, payload)
 
-		kid, err := jws.PeekKID(body)
+		kid, r, err := verifyKID(body, pub44)
 		if err != nil {
-			t.Fatalf("PeekKID: %v", err)
+			t.Fatalf("Verify: %v", err)
 		}
 		if kid != account {
 			t.Errorf("kid %q, want %q", kid, account)
-		}
-		r, err := jws.Verify(body, pub44)
-		if err != nil {
-			t.Fatalf("Verify: %v", err)
 		}
 		if r.Nonce != "ax5RnthDqp_Yf4_HZnFLmA" {
 			t.Errorf("nonce %q", r.Nonce)
@@ -258,10 +282,10 @@ func TestRFC8555Examples(t *testing.T) {
 			t.Errorf("payload %q", r.Payload)
 		}
 
-		if _, err := jws.VerifyWithJWK(body); err == nil {
-			t.Error("VerifyWithJWK accepted a kid-authenticated JWS")
+		if _, _, err := verifyJWK(body); err == nil {
+			t.Error("JWK accepted a kid-authenticated JWS")
 		}
-		if _, err := jws.Verify(body, sk65.PublicKey()); err == nil {
+		if _, _, err := verifyKID(body, sk65.PublicKey()); err == nil {
 			t.Error("Verify accepted the JWS with a key of the wrong parameter set")
 		}
 	})
@@ -288,7 +312,7 @@ func TestRFC8555Examples(t *testing.T) {
      }`
 		outer := sign(t, sk44, outerProtected, string(inner))
 
-		r, err := jws.Verify(outer, pub44)
+		_, r, err := verifyKID(outer, pub44)
 		if err != nil {
 			t.Fatalf("Verify(outer): %v", err)
 		}
@@ -299,11 +323,11 @@ func TestRFC8555Examples(t *testing.T) {
 			t.Error("outer payload is not the inner JWS")
 		}
 
-		ri, err := jws.VerifyWithJWK(r.Payload)
+		innerPub, ri, err := verifyJWK(r.Payload)
 		if err != nil {
-			t.Fatalf("VerifyWithJWK(inner): %v", err)
+			t.Fatalf("Verify(inner): %v", err)
 		}
-		if !ri.PublicKey.Equal(sk65.PublicKey()) {
+		if !innerPub.Equal(sk65.PublicKey()) {
 			t.Error("inner public key is not the new key")
 		}
 		if ri.Nonce != "" {
@@ -328,7 +352,7 @@ func TestRFC8555Examples(t *testing.T) {
 		if !bytes.Contains(body, []byte(`"payload":""`)) {
 			t.Fatalf("expected an empty payload member in %s", body)
 		}
-		r, err := jws.Verify(body, pub44)
+		_, r, err := verifyKID(body, pub44)
 		if err != nil {
 			t.Fatalf("Verify: %v", err)
 		}
@@ -347,7 +371,7 @@ func TestRFC8555Examples(t *testing.T) {
        "nonce": "Q_s3MWoqT05TrdkM2MTDcw",
        "url": "https://example.com/acme/chall/prV_B7yEyA4"
      }`
-		r, err := jws.Verify(sign(t, sk44, protected, "{}"), pub44)
+		_, r, err := verifyKID(sign(t, sk44, protected, "{}"), pub44)
 		if err != nil {
 			t.Fatalf("Verify: %v", err)
 		}
@@ -367,11 +391,11 @@ func TestRFC8555Examples(t *testing.T) {
        "certificate": "MIIEDTCCAvegAwIBAgIRAP8...",
        "reason": 1
      }`
-		r, err := jws.VerifyWithJWK(sign(t, sk65, protected, payload))
+		pub, r, err := verifyJWK(sign(t, sk65, protected, payload))
 		if err != nil {
-			t.Fatalf("VerifyWithJWK: %v", err)
+			t.Fatalf("Verify: %v", err)
 		}
-		if !r.PublicKey.Equal(sk65.PublicKey()) {
+		if !pub.Equal(sk65.PublicKey()) {
 			t.Error("returned public key does not match the JWK")
 		}
 		if r.Nonce != "JHb54aT_KTXBWQOzGYkt9A" || string(r.Payload) != payload {
@@ -390,17 +414,17 @@ func TestAllParameterSets(t *testing.T) {
 
 			body := sign(t, sk, `{"alg":"`+alg+`","jwk":`+publicJWK(v)+`,"nonce":"6S8IqOGY7eL2lsGoTZYifg","url":"https://example.com/acme/new-account"}`,
 				`{"termsOfServiceAgreed":true}`)
-			r, err := jws.VerifyWithJWK(body)
+			pub, _, err := verifyJWK(body)
 			if err != nil {
-				t.Fatalf("VerifyWithJWK: %v", err)
+				t.Fatalf("Verify: %v", err)
 			}
-			if !r.PublicKey.Equal(sk.PublicKey()) || r.PublicKey.Parameters() != params {
+			if !pub.Equal(sk.PublicKey()) || pub.Parameters() != params {
 				t.Error("returned public key does not match")
 			}
 
 			body = sign(t, sk, `{"alg":"`+alg+`","kid":"https://example.com/acme/acct/evOfKhNU60wg","nonce":"ax5RnthDqp_Yf4_HZnFLmA","url":"https://example.com/acme/acct/evOfKhNU60wg"}`,
 				`{"contact":["mailto:admin@example.org"]}`)
-			if _, err := jws.Verify(body, sk.PublicKey()); err != nil {
+			if _, _, err := verifyKID(body, sk.PublicKey()); err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
 		})
@@ -436,7 +460,7 @@ func TestReject(t *testing.T) {
 	tests := []struct {
 		name string
 		body []byte
-		jwk  bool   // verify with VerifyWithJWK instead of Verify
+		jwk  bool   // verify with verifyJWK instead of verifyKID
 		want string // substring of the error, if it comes from the package
 	}{
 		// Signature and encoding.
@@ -475,12 +499,13 @@ func TestReject(t *testing.T) {
 		{"alg lowercase", sign(t, sk44, kidHeader("ml-dsa-44"), payload), false, "unsupported algorithm"},
 		{"alg missing", sign(t, sk44, `{"kid":"k"}`, payload), false, "unsupported algorithm"},
 		{"alg does not match key", sign(t, sk44, kidHeader("ML-DSA-65"), payload), false, "do not match"},
-		{"kid missing", sign(t, sk44, `{"alg":"ML-DSA-44","nonce":"n","url":"u"}`, payload), false, "KID is required"},
-		{"kid empty", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"","nonce":"n","url":"u"}`, payload), false, "KID is required"},
-		{"kid and jwk", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","jwk":`+jwk44+`}`, payload), false, "JWK is not allowed"},
-		{"kid and jwk (VerifyWithJWK)", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","jwk":`+jwk44+`}`, payload), true, "KID is not allowed"},
-		{"jwk missing (VerifyWithJWK)", sign(t, sk44, kidHeader("ML-DSA-44"), payload), true, "JWK is required"},
-		{"jwk null (VerifyWithJWK)", sign(t, sk44, `{"alg":"ML-DSA-44","jwk":null}`, payload), true, "JWK is required"},
+		{"kid missing", sign(t, sk44, `{"alg":"ML-DSA-44","nonce":"n","url":"u"}`, payload), false, "KID or JWK is required"},
+		{"kid empty", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"","nonce":"n","url":"u"}`, payload), false, "KID or JWK is required"},
+		{"kid and jwk", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","jwk":`+jwk44+`}`, payload), false, "mutually exclusive"},
+		{"kid and jwk (JWK)", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","jwk":`+jwk44+`}`, payload), true, "mutually exclusive"},
+		{"jwk missing (JWK)", sign(t, sk44, kidHeader("ML-DSA-44"), payload), true, "JWK is required"},
+		{"jwk null (JWK)", sign(t, sk44, `{"alg":"ML-DSA-44","jwk":null}`, payload), true, "KID or JWK is required"},
+		{"kid missing (KID)", sign(t, sk44, jwkHeader("ML-DSA-44", jwk44), payload), false, "KID is required"},
 
 		// Embedded JWK.
 		{"jwk kty EC", sign(t, sk44, jwkHeader("ML-DSA-44", strings.Replace(jwk44, `"kty":"AKP"`, `"kty":"EC"`, 1)), payload), true, "KTY must be AKP"},
@@ -503,9 +528,9 @@ func TestReject(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var err acmeerrors.Error
 			if tt.jwk {
-				_, err = jws.VerifyWithJWK(tt.body)
+				_, _, err = verifyJWK(tt.body)
 			} else {
-				_, err = jws.Verify(tt.body, pub44)
+				_, _, err = verifyKID(tt.body, pub44)
 			}
 			if err == nil {
 				t.Fatal("accepted")
@@ -519,7 +544,7 @@ func TestReject(t *testing.T) {
 
 func TestErrorTypes(t *testing.T) {
 	v44, sk44 := loadVector(t, mldsa.MLDSA44())
-	_, err := jws.Verify(sign(t, sk44, `{"alg":"ES256","kid":"k"}`, ""), sk44.PublicKey())
+	_, _, err := verifyKID(sign(t, sk44, `{"alg":"ES256","kid":"k"}`, ""), sk44.PublicKey())
 	if err == nil {
 		t.Fatal("Verify accepted ES256")
 	}
@@ -530,17 +555,17 @@ func TestErrorTypes(t *testing.T) {
 		t.Errorf("Verify error fields %v, want algorithms list", err.Fields())
 	}
 
-	_, err = jws.VerifyWithJWK(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":{"kty":"AKP","alg":"ML-DSA-44","pub":"AAAA"}}`, ""))
+	_, _, err = verifyJWK(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":{"kty":"AKP","alg":"ML-DSA-44","pub":"AAAA"}}`, ""))
 	if err == nil {
-		t.Fatal("VerifyWithJWK accepted invalid public key")
+		t.Fatal("Parse accepted invalid public key")
 	}
 	if err.Type() != "urn:ietf:params:acme:error:badPublicKey" || err.Status() != 400 {
-		t.Errorf("VerifyWithJWK returned %v (status %d), want badPublicKey with status 400", err, err.Status())
+		t.Errorf("Parse returned %v (status %d), want badPublicKey with status 400", err, err.Status())
 	}
 
-	_, err = jws.VerifyWithJWK(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":`+publicJWK(v44)+`}`, ""))
+	_, _, err = verifyJWK(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":`+publicJWK(v44)+`}`, ""))
 	if err != nil {
-		t.Errorf("VerifyWithJWK: %v", err)
+		t.Errorf("Verify: %v", err)
 	}
 }
 
@@ -561,22 +586,49 @@ func TestJWKThumbprint(t *testing.T) {
 	}
 }
 
-// TestPeekKID checks that PeekKID extracts the kid without verifying the
-// signature, so that callers can look up the account key before Verify.
-func TestPeekKID(t *testing.T) {
+// TestParse checks that Parse extracts the kid or JWK without verifying the
+// signature, so that callers can look up the account key before Verify, and
+// that Verify refuses a key that does not match the embedded JWK.
+func TestParse(t *testing.T) {
 	v44, sk44 := loadVector(t, mldsa.MLDSA44())
+	_, sk65 := loadVector(t, mldsa.MLDSA65())
 	const account = "https://example.com/acme/acct/evOfKhNU60wg"
 	p, pl, s := signParts(t, sk44, `{"alg":"ML-DSA-44","kid":"`+account+`","nonce":"n","url":"u"}`, "{}")
 
 	corrupted := []byte(s)
 	corrupted[len(corrupted)/2] ^= 1
-	kid, err := jws.PeekKID(flattened(p, pl, string(corrupted)))
-	if err != nil || kid != account {
-		t.Errorf("PeekKID on a corrupted signature returned %q, %v", kid, err)
+	for _, body := range [][]byte{flattened(p, pl, string(corrupted)), flattened(p, pl, "")} {
+		u, err := jws.Parse(body)
+		if err != nil {
+			t.Fatalf("Parse with an invalid signature: %v", err)
+		}
+		if kid, err := u.KID(); err != nil || kid != account {
+			t.Errorf("KID returned %q, %v", kid, err)
+		}
+		if _, err := u.JWK(); err == nil {
+			t.Error("JWK accepted a kid-authenticated JWS")
+		}
+		if _, err := u.Verify(sk44.PublicKey()); err == nil {
+			t.Error("Verify accepted an invalid signature")
+		}
 	}
-	kid, err = jws.PeekKID(flattened(p, pl, ""))
-	if err != nil || kid != account {
-		t.Errorf("PeekKID on an empty signature returned %q, %v", kid, err)
+
+	u, err := jws.Parse(sign(t, sk44, `{"alg":"ML-DSA-44","jwk":`+publicJWK(v44)+`}`, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.KID(); err == nil {
+		t.Error("KID accepted a jwk-authenticated JWS")
+	}
+	pub, err := u.JWK()
+	if err != nil || !pub.Equal(sk44.PublicKey()) {
+		t.Errorf("JWK returned %v, %v", pub, err)
+	}
+	if _, err := u.Verify(sk65.PublicKey()); err == nil {
+		t.Error("Verify accepted a key that does not match the JWK")
+	}
+	if _, err := u.Verify(pub); err != nil {
+		t.Errorf("Verify: %v", err)
 	}
 
 	for _, tt := range []struct {
@@ -584,17 +636,16 @@ func TestPeekKID(t *testing.T) {
 		body []byte
 		want string
 	}{
-		{"jwk", sign(t, sk44, `{"alg":"ML-DSA-44","jwk":`+publicJWK(v44)+`}`, ""), "JWK is not allowed"},
-		{"kid and jwk", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","jwk":`+publicJWK(v44)+`}`, ""), "JWK is not allowed"},
-		{"kid missing", sign(t, sk44, `{"alg":"ML-DSA-44"}`, ""), "KID is required"},
-		{"kid empty", sign(t, sk44, `{"alg":"ML-DSA-44","kid":""}`, ""), "KID is required"},
+		{"kid and jwk", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","jwk":`+publicJWK(v44)+`}`, ""), "mutually exclusive"},
+		{"kid missing", sign(t, sk44, `{"alg":"ML-DSA-44"}`, ""), "KID or JWK is required"},
+		{"kid empty", sign(t, sk44, `{"alg":"ML-DSA-44","kid":""}`, ""), "KID or JWK is required"},
 		{"unknown header parameter", sign(t, sk44, `{"alg":"ML-DSA-44","kid":"k","typ":"JOSE"}`, ""), "unknown object member name"},
 		{"invalid body", []byte("{"), ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			kid, err := jws.PeekKID(tt.body)
+			u, err := jws.Parse(tt.body)
 			if err == nil {
-				t.Fatalf("accepted, returned %q", kid)
+				t.Fatalf("accepted, returned %+v", u)
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q does not contain %q", err, tt.want)

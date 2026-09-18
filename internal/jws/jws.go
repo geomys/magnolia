@@ -74,31 +74,23 @@ type mldsaJWK struct {
 	Pub []byte `json:"pub"`
 }
 
-func PeekKID(jws []byte) (string, acmeerrors.Error) {
-	var f flattenedJWS
-	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
-		return "", acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
-	}
-	var h header
-	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
-		return "", acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
-	}
-	if h.JWK != nil {
-		return "", acmeerrors.New("malformed", 400, "JWK is not allowed in this context")
-	}
-	if h.KID == "" {
-		return "", acmeerrors.New("malformed", 400, "KID is required in this context")
-	}
-	return h.KID, nil
+// Unverified is a parsed JWS whose signature has not been checked yet.
+// Callers select the key with KID or JWK, and then call Verify.
+type Unverified struct {
+	protected []byte
+	payload   []byte
+	signature []byte
+
+	params mldsa.Parameters
+	nonce  string
+	url    string
+	kid    string
+	jwk    *mldsa.PublicKey
 }
 
-type JWS struct {
-	Nonce   string // base64url-encoded
-	URL     string
-	Payload []byte
-}
-
-func Verify(jws []byte, pub *mldsa.PublicKey) (*JWS, acmeerrors.Error) {
+// Parse decodes a JWS in the Flattened JSON Serialization.
+// Exactly one of "kid" and "jwk" must be present.
+func Parse(jws []byte) (*Unverified, acmeerrors.Error) {
 	var f flattenedJWS
 	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
 		return nil, acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
@@ -107,30 +99,86 @@ func Verify(jws []byte, pub *mldsa.PublicKey) (*JWS, acmeerrors.Error) {
 	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
 		return nil, acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
 	}
-	if h.JWK != nil {
-		return nil, acmeerrors.New("malformed", 400, "JWK is not allowed in this context")
+	if h.JWK != nil && h.KID != "" {
+		return nil, acmeerrors.New("malformed", 400, "KID and JWK are mutually exclusive")
 	}
-	if h.KID == "" {
-		return nil, acmeerrors.New("malformed", 400, "KID is required in this context")
+	if h.JWK == nil && h.KID == "" {
+		return nil, acmeerrors.New("malformed", 400, "KID or JWK is required")
 	}
 	params, err := algToParameters(h.Alg)
 	if err != nil {
 		return nil, err
 	}
-	if pub.Parameters() != params {
-		return nil, acmeerrors.New("badPublicKey", 400, "public key parameters do not match algorithm")
+	u := &Unverified{
+		protected: f.Protected,
+		payload:   f.Payload,
+		signature: f.Signature,
+		params:    params,
+		nonce:     h.Nonce,
+		url:       h.URL,
+		kid:       h.KID,
+	}
+	if h.JWK != nil {
+		if h.JWK.KTY != "AKP" {
+			return nil, acmeerrors.New("badPublicKey", 400, "JWK KTY must be AKP")
+		}
+		if h.JWK.Alg != h.Alg {
+			return nil, acmeerrors.New("badPublicKey", 400, "JWK alg must match protected header alg")
+		}
+		pub, err := mldsa.NewPublicKey(params, h.JWK.Pub)
+		if err != nil {
+			return nil, acmeerrors.New("badPublicKey", 400, "invalid public key:", err.Error())
+		}
+		u.jwk = pub
+	}
+	return u, nil
+}
+
+// KID returns the "kid" header parameter, or an error if the JWS carries an
+// embedded JWK instead.
+func (u *Unverified) KID() (string, acmeerrors.Error) {
+	if u.kid == "" {
+		return "", acmeerrors.New("malformed", 400, "KID is required in this context")
+	}
+	return u.kid, nil
+}
+
+// JWK returns the public key from the "jwk" header parameter, or an error if
+// the JWS carries a "kid" instead.
+func (u *Unverified) JWK() (*mldsa.PublicKey, acmeerrors.Error) {
+	if u.jwk == nil {
+		return nil, acmeerrors.New("malformed", 400, "JWK is required in this context")
+	}
+	return u.jwk, nil
+}
+
+// JWS is a verified JWS.
+type JWS struct {
+	Nonce   string // base64url-encoded
+	URL     string
+	Payload []byte
+}
+
+// Verify checks the signature with pub. If the JWS carries an embedded JWK,
+// pub must be that key.
+func (u *Unverified) Verify(pub *mldsa.PublicKey) (*JWS, acmeerrors.Error) {
+	if u.jwk != nil && !u.jwk.Equal(pub) {
+		return nil, acmeerrors.Internal("public key does not match embedded JWK")
+	}
+	if pub.Parameters() != u.params {
+		return nil, acmeerrors.New("malformed", 400, "alg and key parameters do not match")
 	}
 	var signed []byte
-	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Protected)...)
+	signed = append(signed, base64.RawURLEncoding.EncodeToString(u.protected)...)
 	signed = append(signed, '.')
-	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Payload)...)
-	if err := mldsa.Verify(pub, signed, f.Signature, nil); err != nil {
+	signed = append(signed, base64.RawURLEncoding.EncodeToString(u.payload)...)
+	if err := mldsa.Verify(pub, signed, u.signature, nil); err != nil {
 		return nil, acmeerrors.New("unauthorized", 403, "signature verification failed:", err.Error())
 	}
 	return &JWS{
-		Nonce:   h.Nonce,
-		URL:     h.URL,
-		Payload: f.Payload,
+		Nonce:   u.nonce,
+		URL:     u.url,
+		Payload: u.payload,
 	}, nil
 }
 
@@ -147,57 +195,6 @@ func algToParameters(alg string) (mldsa.Parameters, acmeerrors.Error) {
 		err = err.WithField("algorithms", []string{"ML-DSA-44", "ML-DSA-65", "ML-DSA-87"})
 		return mldsa.Parameters{}, err
 	}
-}
-
-type JWSWithPublicKey struct {
-	PublicKey *mldsa.PublicKey
-	Nonce     string // base64url-encoded
-	URL       string
-	Payload   []byte
-}
-
-func VerifyWithJWK(jws []byte) (*JWSWithPublicKey, acmeerrors.Error) {
-	var f flattenedJWS
-	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
-		return nil, acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
-	}
-	var h header
-	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
-		return nil, acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
-	}
-	if h.JWK == nil {
-		return nil, acmeerrors.New("malformed", 400, "JWK is required in this context")
-	}
-	if h.KID != "" {
-		return nil, acmeerrors.New("malformed", 400, "KID is not allowed in this context")
-	}
-	params, aerr := algToParameters(h.Alg)
-	if aerr != nil {
-		return nil, aerr
-	}
-	if h.JWK.KTY != "AKP" {
-		return nil, acmeerrors.New("badPublicKey", 400, "JWK KTY must be AKP")
-	}
-	if h.JWK.Alg != h.Alg {
-		return nil, acmeerrors.New("badPublicKey", 400, "JWK alg must match protected header alg")
-	}
-	pub, err := mldsa.NewPublicKey(params, h.JWK.Pub)
-	if err != nil {
-		return nil, acmeerrors.New("badPublicKey", 400, "invalid public key:", err.Error())
-	}
-	var signed []byte
-	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Protected)...)
-	signed = append(signed, '.')
-	signed = append(signed, base64.RawURLEncoding.EncodeToString(f.Payload)...)
-	if err := mldsa.Verify(pub, signed, f.Signature, nil); err != nil {
-		return nil, acmeerrors.New("unauthorized", 403, "signature verification failed:", err.Error())
-	}
-	return &JWSWithPublicKey{
-		PublicKey: pub,
-		Nonce:     h.Nonce,
-		URL:       h.URL,
-		Payload:   f.Payload,
-	}, nil
 }
 
 // JWKThumbprint computes the base64url-encoded SHA-256 JWK Thumbprint of a
