@@ -5,6 +5,7 @@ import (
 	"crypto/mldsa"
 	"encoding/json/v2"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
 
@@ -12,10 +13,35 @@ import (
 	"geomys.org/magnolia/internal/jws"
 )
 
-// acmeHandler processes a verified request and returns the HTTP status code
-// and the JSON body (or nil for an empty body). Handlers may set response
-// headers on w, but must not write the status or body themselves.
-type acmeHandler func(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error)
+// acmeHandler processes a verified request and returns the response, or an
+// error to send as a problem document.
+type acmeHandler func(payload []byte, r *http.Request) (*response, acmeerrors.Error)
+
+// response is a successful ACME response.
+type response struct {
+	status  int
+	body    any // JSON-encoded, or nil for an empty body
+	headers map[string]string
+}
+
+// respond returns a response with a 2xx status.
+func respond(status int, body any) *response {
+	if status < 200 || status > 299 {
+		panic("respond: status must be 2xx, errors are acmeerrors.Error values")
+	}
+	return &response{status: status, body: body}
+}
+
+// WithHeader returns a copy of the response with an additional header.
+func (r *response) WithHeader(key, value string) *response {
+	q := *r
+	q.headers = maps.Clone(r.headers)
+	if q.headers == nil {
+		q.headers = make(map[string]string)
+	}
+	q.headers[key] = value
+	return &q
+}
 
 const withKID = true
 const withJWK = false
@@ -85,12 +111,12 @@ func acmeMiddleware(ca *CA, next acmeHandler, useKID bool) http.Handler {
 			writeError(w, err)
 			return
 		}
-		status, resp, err := next(w, j.Payload, r)
+		resp, err := next(j.Payload, r)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeResponse(w, status, resp)
+		writeResponse(w, resp)
 	})
 }
 
@@ -99,34 +125,38 @@ func plainGETMiddleware(ca *CA, next acmeHandler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Replay-Nonce", ca.nonceIssuer.Mint())
 		w.Header().Set("Link", `<`+ca.writePrefix.String()+`/directory>;rel="index"`)
-		status, resp, err := next(w, nil, r)
+		resp, err := next(nil, r)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeResponse(w, status, resp)
+		writeResponse(w, resp)
 	})
 }
 
-func writeResponse(w http.ResponseWriter, status int, resp any) {
-	if resp == nil {
-		w.WriteHeader(status)
+func writeResponse(w http.ResponseWriter, resp *response) {
+	if resp.body == nil {
+		for k, v := range resp.headers {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(resp.status)
 		return
 	}
-	out, err := json.Marshal(resp)
+	out, err := json.Marshal(resp.body)
 	if err != nil {
 		writeError(w, acmeerrors.Internal("failed to encode response: %w", err))
 		return
 	}
+	for k, v := range resp.headers {
+		w.Header().Set(k, v)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(resp.status)
 	w.Write(out)
 }
 
 func writeError(w http.ResponseWriter, err acmeerrors.Error) {
-	// TODO: check if headers have already been written before.
 	w.Header().Set("Content-Type", "application/problem+json")
-	w.Header().Del("Content-Length")
 	w.Header().Set("Cache-Control", "no-store")
 	for k, v := range err.Headers() {
 		w.Header().Set(k, v)

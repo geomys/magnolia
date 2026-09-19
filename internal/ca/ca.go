@@ -83,137 +83,135 @@ func (ca *CA) Handler() http.Handler {
 	return http.MaxBytesHandler(mux, 1<<16) // 64 KiB
 }
 
-func (ca *CA) handleDirectory(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error) {
+func (ca *CA) handleDirectory(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
 	if len(payload) != 0 {
-		return 0, nil, acmeerrors.New("malformed", 400, "unexpected payload for directory request")
+		return nil, acmeerrors.New("malformed", 400, "unexpected payload for directory request")
 	}
-	return 200, map[string]string{
+	return respond(200, map[string]string{
 		rand.Text():  "https://community.letsencrypt.org/t/adding-random-entries-to-the-directory/33417",
 		"newNonce":   ca.writePrefix.String() + "/nonce",
 		"newAccount": ca.writePrefix.String() + "/new-account",
 		"keyChange":  ca.writePrefix.String() + "/key-change",
-	}, nil
+	}), nil
 }
 
-func (ca *CA) handleNewNonce(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error) {
+func (ca *CA) handleNewNonce(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
 	if len(payload) != 0 {
-		return 0, nil, acmeerrors.New("malformed", 400, "unexpected payload for new nonce request")
+		return nil, acmeerrors.New("malformed", 400, "unexpected payload for new nonce request")
 	}
-	w.Header().Set("Cache-Control", "no-store")
+	status := 200
 	if r.Method == http.MethodGet {
-		return 204, nil, nil
+		status = 204
 	}
-	return 200, nil, nil
+	return respond(status, nil).WithHeader("Cache-Control", "no-store"), nil
 }
 
-func (ca *CA) handleNewAccount(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error) {
+func (ca *CA) handleNewAccount(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
 	var req struct {
 		OnlyExisting bool `json:"onlyReturnExisting"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
-		return 0, nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
+		return nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
 	}
 	pub := r.Context().Value(jwkContextKey).(*mldsa.PublicKey)
 	if req.OnlyExisting {
 		acct, err := ca.accounts.lookup(r.Context(), pub)
 		if err != nil {
-			return 0, nil, err
+			return nil, err
 		}
-		return ca.newAccountExists(w, acct)
+		return newAccountExists(acct)
 	}
 	kid := ca.writePrefix.String() + "/account/" + rand.Text()
 	acct, created, err := ca.accounts.create(r.Context(), pub, kid)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	if !created {
-		return ca.newAccountExists(w, acct)
+		return newAccountExists(acct)
 	}
-	w.Header().Set("Location", acct.kid)
-	return 201, map[string]string{
+	return respond(201, map[string]string{
 		"status": "valid",
-	}, nil
+	}).WithHeader("Location", acct.kid), nil
 }
 
-func (ca *CA) newAccountExists(w http.ResponseWriter, acct *account) (int, any, acmeerrors.Error) {
+func newAccountExists(acct *account) (*response, acmeerrors.Error) {
 	if acct.deactivated {
-		return 0, nil, acmeerrors.New("unauthorized", 401, "account is deactivated")
+		return nil, acmeerrors.New("unauthorized", 401, "account is deactivated")
 	}
-	w.Header().Set("Location", acct.kid)
-	return 200, map[string]string{
+	return respond(200, map[string]string{
 		"status": "valid",
-	}, nil
+	}).WithHeader("Location", acct.kid), nil
 }
 
-func (ca *CA) handleAccountUpdate(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error) {
+func (ca *CA) handleAccountUpdate(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
 	kid := r.Context().Value(kidContextKey).(string)
 	reqURL := ca.writePrefix.Scheme + "://" + ca.writePrefix.Host + r.URL.RequestURI()
 	if kid != reqURL {
-		return 0, nil, acmeerrors.New("unauthorized", 403, "KID does not match request URL")
+		return nil, acmeerrors.New("unauthorized", 403, "KID does not match request URL")
 	}
 	if len(payload) == 0 {
-		return 200, map[string]string{
+		return respond(200, map[string]string{
 			"status": "valid",
-		}, nil
+		}), nil
 	}
 	var req struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
-		return 0, nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
+		return nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
 	}
 	if req.Status == "deactivated" {
 		if err := ca.accounts.deactivate(r.Context(), kid); err != nil {
-			return 0, nil, err
+			return nil, err
 		}
-		return 200, map[string]string{
+		return respond(200, map[string]string{
 			"status": "deactivated",
-		}, nil
+		}), nil
 	}
-	return 200, map[string]string{
+	return respond(200, map[string]string{
 		"status": "valid",
-	}, nil
+	}), nil
 }
 
-func (ca *CA) handleKeyChange(w http.ResponseWriter, payload []byte, r *http.Request) (int, any, acmeerrors.Error) {
+func (ca *CA) handleKeyChange(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
 	kid := r.Context().Value(kidContextKey).(string)
 	reqURL := ca.writePrefix.Scheme + "://" + ca.writePrefix.Host + r.URL.RequestURI()
 	u, err := jws.Parse(payload)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	newKey, err := u.JWK()
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	j, err := u.Verify(newKey)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	if j.Nonce != "" {
-		return 0, nil, acmeerrors.New("malformed", 400, "unexpected nonce in key change request")
+		return nil, acmeerrors.New("malformed", 400, "unexpected nonce in key change request")
 	}
 	if j.URL != reqURL {
-		return 0, nil, acmeerrors.New("malformed", 400, "inner JWS URL does not match request URL")
+		return nil, acmeerrors.New("malformed", 400, "inner JWS URL does not match request URL")
 	}
 	var keyChange struct {
 		Account string         `json:"account"`
 		OldKey  jsontext.Value `json:"oldKey"`
 	}
 	if err := json.Unmarshal(j.Payload, &keyChange); err != nil {
-		return 0, nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
+		return nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
 	}
 	if keyChange.Account != kid {
-		return 0, nil, acmeerrors.New("unauthorized", 403, "account in key change request does not match KID")
+		return nil, acmeerrors.New("unauthorized", 403, "account in key change request does not match KID")
 	}
 	oldKey, err := jws.ParseJWK(keyChange.OldKey)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	if err := ca.accounts.rekey(r.Context(), kid, oldKey, newKey); err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	return 200, map[string]string{
+	return respond(200, map[string]string{
 		"status": "valid",
-	}, nil
+	}), nil
 }
