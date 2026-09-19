@@ -24,20 +24,27 @@ type Error interface {
 	Fields() map[string]any
 	// WithField returns a copy of the Error with an additional field.
 	WithField(key string, value any) Error
+	// Headers are response headers to set alongside the problem document,
+	// such as "Location" for a badPublicKey conflict with another account.
+	Headers() map[string]string
+	// WithHeader returns a copy of the Error with an additional header.
+	WithHeader(key, value string) Error
 }
 
 type problem struct {
-	typ    string
-	detail string
-	status int
-	fields map[string]any
+	typ     string
+	detail  string
+	status  int
+	fields  map[string]any
+	headers map[string]string
 }
 
-func (p *problem) Error() string          { return "[" + p.typ + "] " + p.detail }
-func (p *problem) Type() string           { return p.typ }
-func (p *problem) Detail() string         { return p.detail }
-func (p *problem) Status() int            { return p.status }
-func (p *problem) Fields() map[string]any { return p.fields }
+func (p *problem) Error() string              { return "[" + p.typ + "] " + p.detail }
+func (p *problem) Type() string               { return p.typ }
+func (p *problem) Detail() string             { return p.detail }
+func (p *problem) Status() int                { return p.status }
+func (p *problem) Fields() map[string]any     { return p.fields }
+func (p *problem) Headers() map[string]string { return p.headers }
 
 func (p *problem) WithField(key string, value any) Error {
 	q := *p
@@ -46,6 +53,16 @@ func (p *problem) WithField(key string, value any) Error {
 		q.fields = make(map[string]any)
 	}
 	q.fields[key] = value
+	return &q
+}
+
+func (p *problem) WithHeader(key, value string) Error {
+	q := *p
+	q.headers = maps.Clone(p.headers)
+	if q.headers == nil {
+		q.headers = make(map[string]string)
+	}
+	q.headers[key] = value
 	return &q
 }
 

@@ -56,19 +56,12 @@ func acmeMiddleware(ca *CA, next acmeHandler, useKID bool) http.Handler {
 				writeError(w, err)
 				return
 			}
-			var ok bool
-			ca.accountMu.RLock()
-			pub, ok = ca.accounts[kid]
-			deactivated := ca.accountDeactivated[kid]
-			ca.accountMu.RUnlock()
-			if !ok {
-				writeError(w, acmeerrors.New("accountDoesNotExist", 400, "unknown account"))
+			acct, err := ca.accounts.get(r.Context(), kid)
+			if err != nil {
+				writeError(w, err)
 				return
 			}
-			if deactivated {
-				writeError(w, acmeerrors.New("unauthorized", 401, "account is deactivated"))
-				return
-			}
+			pub = acct.key
 			r = r.WithContext(context.WithValue(r.Context(), kidContextKey, kid))
 		} else {
 			pub, err = u.JWK()
@@ -135,6 +128,9 @@ func writeError(w http.ResponseWriter, err acmeerrors.Error) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Del("Content-Length")
 	w.Header().Set("Cache-Control", "no-store")
+	for k, v := range err.Headers() {
+		w.Header().Set(k, v)
+	}
 	w.WriteHeader(err.Status())
 	fields := map[string]any{
 		"type":   err.Type(),

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 
 	"geomys.org/magnolia/internal/acmeerrors"
 	"geomys.org/magnolia/internal/jws"
@@ -22,16 +21,13 @@ type CA struct {
 	writePrefix *url.URL
 	nonceIssuer *nonce.Issuer
 	nonceSpent  *nonce.Spent
-
-	accountMu          sync.RWMutex
-	accounts           map[string]*mldsa.PublicKey // kid => key
-	accountKeys        map[string]string           // JWKThumbprint => kid
-	accountDeactivated map[string]bool             // kid => deactivated
+	accounts    *accountStore
 }
 
 type Config struct {
 	WritePrefix string // e.g. "https://ca.example.com/acme"
 	NonceKey    []byte // 32 bytes
+	Accounts    string // SQLite database path; created if it doesn't exist
 }
 
 func New(config Config) (*CA, error) {
@@ -53,14 +49,20 @@ func New(config Config) (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
+	accounts, err := openAccountStore(config.Accounts)
+	if err != nil {
+		return nil, err
+	}
 	return &CA{
-		writePrefix:        u,
-		nonceIssuer:        issuer,
-		nonceSpent:         nonce.NewSpent(issuer, 300_000),
-		accounts:           make(map[string]*mldsa.PublicKey),
-		accountKeys:        make(map[string]string),
-		accountDeactivated: make(map[string]bool),
+		writePrefix: u,
+		nonceIssuer: issuer,
+		nonceSpent:  nonce.NewSpent(issuer, 300_000),
+		accounts:    accounts,
 	}, nil
+}
+
+func (ca *CA) Close() error {
+	return ca.accounts.Close()
 }
 
 func (ca *CA) Handler() http.Handler {
@@ -112,26 +114,33 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, payload []byte, r *http.Re
 		return 0, nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
 	}
 	pub := r.Context().Value(jwkContextKey).(*mldsa.PublicKey)
-	thumbprint := jws.JWKThumbprint(pub)
-	ca.accountMu.Lock()
-	defer ca.accountMu.Unlock()
-	if kid, ok := ca.accountKeys[thumbprint]; ok {
-		if ca.accountDeactivated[kid] {
-			return 0, nil, acmeerrors.New("unauthorized", 401, "account is deactivated")
-		}
-		w.Header().Set("Location", kid)
-		return 200, map[string]string{
-			"status": "valid",
-		}, nil
-	}
 	if req.OnlyExisting {
-		return 0, nil, acmeerrors.New("accountDoesNotExist", 400, "unknown account")
+		acct, err := ca.accounts.lookup(r.Context(), pub)
+		if err != nil {
+			return 0, nil, err
+		}
+		return ca.newAccountExists(w, acct)
 	}
 	kid := ca.writePrefix.String() + "/account/" + rand.Text()
-	ca.accounts[kid] = pub
-	ca.accountKeys[thumbprint] = kid
-	w.Header().Set("Location", kid)
+	acct, created, err := ca.accounts.create(r.Context(), pub, kid)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !created {
+		return ca.newAccountExists(w, acct)
+	}
+	w.Header().Set("Location", acct.kid)
 	return 201, map[string]string{
+		"status": "valid",
+	}, nil
+}
+
+func (ca *CA) newAccountExists(w http.ResponseWriter, acct *account) (int, any, acmeerrors.Error) {
+	if acct.deactivated {
+		return 0, nil, acmeerrors.New("unauthorized", 401, "account is deactivated")
+	}
+	w.Header().Set("Location", acct.kid)
+	return 200, map[string]string{
 		"status": "valid",
 	}, nil
 }
@@ -154,9 +163,9 @@ func (ca *CA) handleAccountUpdate(w http.ResponseWriter, payload []byte, r *http
 		return 0, nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
 	}
 	if req.Status == "deactivated" {
-		ca.accountMu.Lock()
-		ca.accountDeactivated[kid] = true
-		ca.accountMu.Unlock()
+		if err := ca.accounts.deactivate(r.Context(), kid); err != nil {
+			return 0, nil, err
+		}
 		return 200, map[string]string{
 			"status": "deactivated",
 		}, nil
@@ -177,7 +186,6 @@ func (ca *CA) handleKeyChange(w http.ResponseWriter, payload []byte, r *http.Req
 	if err != nil {
 		return 0, nil, err
 	}
-	newThumbprint := jws.JWKThumbprint(newKey)
 	j, err := u.Verify(newKey)
 	if err != nil {
 		return 0, nil, err
@@ -202,21 +210,9 @@ func (ca *CA) handleKeyChange(w http.ResponseWriter, payload []byte, r *http.Req
 	if err != nil {
 		return 0, nil, err
 	}
-	ca.accountMu.Lock()
-	defer ca.accountMu.Unlock()
-	if !oldKey.Equal(ca.accounts[kid]) {
-		return 0, nil, acmeerrors.New("unauthorized", 403, "old key does not match current key")
+	if err := ca.accounts.rekey(r.Context(), kid, oldKey, newKey); err != nil {
+		return 0, nil, err
 	}
-	if newKey.Equal(oldKey) {
-		return 0, nil, acmeerrors.New("malformed", 400, "new key is the same as the current key")
-	}
-	if existingKID, exists := ca.accountKeys[newThumbprint]; exists {
-		w.Header().Set("Location", existingKID)
-		return 0, nil, acmeerrors.New("badPublicKey", 409, "key is already in use by another account")
-	}
-	delete(ca.accountKeys, jws.JWKThumbprint(oldKey))
-	ca.accountKeys[newThumbprint] = kid
-	ca.accounts[kid] = newKey
 	return 200, map[string]string{
 		"status": "valid",
 	}, nil

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -22,10 +23,16 @@ func newTestCA(t testing.TB) (http.Handler, string) {
 	c, err := ca.New(ca.Config{
 		WritePrefix: "https://magnolia.test/acme",
 		NonceKey:    bytes.Repeat([]byte{42}, 32),
+		Accounts:    filepath.Join(t.TempDir(), "accounts.db"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	// Nonces minted in the same millisecond the CA started are rejected as
 	// too old, and fake time only advances when everything is idle.
 	time.Sleep(time.Millisecond)
