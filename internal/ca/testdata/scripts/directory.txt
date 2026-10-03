@@ -5,6 +5,7 @@ GET $dirURL
 $body.newNonce ~ ^https://
 $body.newAccount ~ ^https://
 $body.keyChange ~ ^https://
+$body.newOrder ~ ^https://
 $body.revokeCert !exists
 $body.newAccount == $dir.newAccount
 $body.keyChange == $dir.keyChange

@@ -8,7 +8,10 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"geomys.org/magnolia/internal/acmeerrors"
 	"geomys.org/magnolia/internal/jws"
@@ -22,6 +25,7 @@ type CA struct {
 	nonceIssuer *nonce.Issuer
 	nonceSpent  *nonce.Spent
 	accounts    *accountStore
+	orders      sync.Map // id string => *order
 }
 
 type Config struct {
@@ -80,6 +84,10 @@ func (ca *CA) Handler() http.Handler {
 	mux.Handle(postPrefix+"/account/", acmeMiddleware(ca, ca.handleAccountUpdate, withKID))
 	mux.Handle(postPrefix+"/key-change", acmeMiddleware(ca, ca.handleKeyChange, withKID))
 
+	mux.Handle(postPrefix+"/new-order", acmeMiddleware(ca, ca.handleNewOrder, withKID))
+	mux.Handle(postPrefix+"/order/{order}", acmeMiddleware(ca, ca.handleOrder, withKID))
+	mux.Handle(postPrefix+"/order/{order}/authz/{i}", acmeMiddleware(ca, ca.handleAuthz, withKID))
+
 	return http.MaxBytesHandler(mux, 1<<16) // 64 KiB
 }
 
@@ -92,6 +100,7 @@ func (ca *CA) handleDirectory(payload []byte, r *http.Request) (*response, acmee
 		"newNonce":   ca.writePrefix.String() + "/nonce",
 		"newAccount": ca.writePrefix.String() + "/new-account",
 		"keyChange":  ca.writePrefix.String() + "/key-change",
+		"newOrder":   ca.writePrefix.String() + "/new-order",
 	}), nil
 }
 
@@ -214,4 +223,97 @@ func (ca *CA) handleKeyChange(payload []byte, r *http.Request) (*response, acmee
 	return respond(200, map[string]string{
 		"status": "valid",
 	}), nil
+}
+
+func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
+	var req struct {
+		Identifiers []struct {
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		} `json:"identifiers"`
+		NotBefore *jsontext.Value `json:"notBefore"`
+		NotAfter  *jsontext.Value `json:"notAfter"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
+	}
+	if req.NotBefore != nil {
+		return nil, acmeerrors.Custom("unsupportedField", 400, "notBefore not supported in order requests")
+	}
+	if req.NotAfter != nil {
+		return nil, acmeerrors.Custom("unsupportedField", 400, "notAfter not supported in order requests")
+	}
+
+	if len(req.Identifiers) == 0 {
+		return nil, acmeerrors.New("malformed", 400, "order must include at least one identifier")
+	}
+
+	ord := &order{
+		id:      rand.Text(),
+		account: r.Context().Value(kidContextKey).(string),
+		created: time.Now(),
+	}
+	seen := make(map[string]bool)
+	for _, id := range req.Identifiers {
+		if id.Type != "dns" {
+			return nil, acmeerrors.New("unsupportedIdentifier", 400, "only dns identifiers are supported")
+		}
+		if seen[id.Value] {
+			return nil, acmeerrors.New("malformed", 400, "duplicate identifier "+id.Value)
+		}
+		seen[id.Value] = true
+		// TODO: validate the identifier!
+		ord.dnsIdentifiers = append(ord.dnsIdentifiers, id.Value)
+		ord.authz = append(ord.authz, authz{token: rand.Text()})
+	}
+	res := ca.renderOrder(ord)
+
+	ca.orders.Store(ord.id, ord)
+
+	return respond(201, res).WithHeader("Location", ca.orderURL(ord)), nil
+}
+
+func (ca *CA) loadOrder(id string, r *http.Request) (*order, acmeerrors.Error) {
+	ordAny, ok := ca.orders.Load(id)
+	if !ok {
+		return nil, acmeerrors.Custom("orderNotFound", 404, "order does not exist or is expired")
+	}
+	ord := ordAny.(*order)
+	if ord.expiry().Before(time.Now()) {
+		return nil, acmeerrors.Custom("orderNotFound", 404, "order does not exist or is expired")
+	}
+	if ord.account != r.Context().Value(kidContextKey).(string) {
+		return nil, acmeerrors.New("unauthorized", 403, "order is not owned by this account")
+	}
+	return ord, nil
+}
+
+func (ca *CA) handleOrder(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
+	if len(payload) != 0 {
+		return nil, acmeerrors.New("malformed", 400, "unexpected payload for order request")
+	}
+	ord, acmeErr := ca.loadOrder(r.PathValue("order"), r)
+	if acmeErr != nil {
+		return nil, acmeErr
+	}
+	return respond(200, ca.renderOrder(ord)), nil
+}
+
+func (ca *CA) handleAuthz(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
+	if len(payload) != 0 {
+		return nil, acmeerrors.New("malformed", 400, "unexpected payload for authz request")
+	}
+	ord, acmeErr := ca.loadOrder(r.PathValue("order"), r)
+	if acmeErr != nil {
+		return nil, acmeErr
+	}
+	i, err := strconv.Atoi(r.PathValue("i"))
+	if err != nil || strconv.Itoa(i) != r.PathValue("i") || i < 0 {
+		return nil, acmeerrors.Custom("authzNotFound", 404, "authz URL is invalid")
+	}
+	res, acmeErr := ca.renderAuthz(ord, i)
+	if acmeErr != nil {
+		return nil, acmeErr
+	}
+	return respond(200, res), nil
 }

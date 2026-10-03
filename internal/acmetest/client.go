@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Key is an account key, optionally bound to an account URL.
@@ -491,12 +492,54 @@ func (c *Client) checkInvariants(ex *Exchange) {
 		}
 	}
 
+	if resp.StatusCode/100 == 2 {
+		checkTimestamps("", resp.JSON, fail)
+	}
+
 	if resp.StatusCode/100 == 2 && req.Method == "POST" && c.isAccountURL(req.URL) {
 		obj, _ := resp.JSON.(map[string]any)
 		switch status, _ := obj["status"].(string); status {
 		case "valid", "deactivated", "revoked":
 		default:
 			fail("account status %q is not valid, deactivated, or revoked", status)
+		}
+	}
+}
+
+// timestampFields are the JSON members that ACME defines as RFC 3339
+// timestamps: expires, notBefore, notAfter, and validated from RFC 8555, and
+// the start and end of suggestedWindow from RFC 9773. The other extensions
+// (RFC 8737, RFC 8738, dns-persist-01) define no timestamp members.
+var timestampFields = map[string]bool{
+	"expires": true, "validated": true, "notBefore": true, "notAfter": true,
+	"start": true, "end": true,
+}
+
+// checkTimestamps walks a JSON value and reports every timestamp member that
+// is not an RFC 3339 string in UTC with whole seconds. RFC 8555 only requires
+// RFC 3339, but all its examples use the Z suffix, and a single fixed form
+// keeps clients simple.
+func checkTimestamps(path string, v any, fail func(string, ...any)) {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, vv := range v {
+			p := path + "." + k
+			if timestampFields[k] {
+				s, ok := vv.(string)
+				if !ok {
+					fail("%s is not a string", p)
+					continue
+				}
+				if t, err := time.Parse(time.RFC3339, s); err != nil || t.UTC().Format(time.RFC3339) != s {
+					fail("%s = %q is not an RFC 3339 UTC timestamp with whole seconds", p, s)
+				}
+				continue
+			}
+			checkTimestamps(p, vv, fail)
+		}
+	case []any:
+		for i, vv := range v {
+			checkTimestamps(fmt.Sprintf("%s[%d]", path, i), vv, fail)
 		}
 	}
 }

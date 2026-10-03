@@ -162,12 +162,5 @@ func writeError(w http.ResponseWriter, err acmeerrors.Error) {
 		w.Header().Set(k, v)
 	}
 	w.WriteHeader(err.Status())
-	fields := map[string]any{
-		"type":   err.Type(),
-		"detail": err.Detail(),
-	}
-	for k, v := range err.Fields() {
-		fields[k] = v
-	}
-	json.MarshalWrite(w, fields)
+	json.MarshalWrite(w, acmeerrors.Render(err))
 }

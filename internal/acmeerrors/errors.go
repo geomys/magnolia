@@ -94,3 +94,13 @@ func Internal(format string, a ...any) Error {
 		status: 500,
 	}
 }
+
+// Render produces a map representation of the Error suitable for JSON encoding.
+func Render(err Error) map[string]any {
+	j := map[string]any{
+		"type":   err.Type(),
+		"detail": err.Detail(),
+	}
+	maps.Copy(j, err.Fields())
+	return j
+}
