@@ -64,6 +64,14 @@ func definitions(h *ht.Hetrix) {
 	node(he, "tuscolo", "navigli")
 	node(he, "trastevere", "loreto")
 
+	// Prometheus paging: the keyword is present only while Prometheus answers
+	// and no severity=page alert is firing.
+	he.StagingWebsite(ht.Website{
+		Name:    "alerts.sunlight.geomys.org",
+		Target:  "https://alerts.sunlight.geomys.org/",
+		Keyword: "no_pages_firing",
+	})
+
 	he.ProdWebsite(ht.Website{
 		Name:     "endpoint_uptime_24h.csv",
 		Target:   "https://uptime.geomys.org/ct/24h/geomys.org",
