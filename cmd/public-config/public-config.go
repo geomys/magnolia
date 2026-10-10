@@ -48,6 +48,7 @@ var tuscoloConfigFiles = []string{
 	"/etc/systemd/system/plc-replica.service",
 	"/etc/prometheus/prometheus.yml",
 	"/etc/prometheus/rules.yml",
+	"/etc/prometheus/alerts.yml",
 }
 
 func main() {
