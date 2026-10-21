@@ -2,7 +2,6 @@ package lockstep
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,9 +18,9 @@ var ErrLogNotFound = errors.New("log not found")
 
 // A LockBackend is a database that supports compare-and-swap operations.
 //
-// The behavior of calls with the same logID must be serializable and have
+// The behavior of calls with the same origin must be serializable and have
 // read-after-write consistency, even across processes and restarts, and write
-// operations must be durable once they return. Calls with different logID
+// operations must be durable once they return. Calls with different origin
 // values don't need to be consistent.
 //
 // It is shared across multiple Log instances, and is used only to store the
@@ -33,7 +32,7 @@ type LockBackend interface {
 	// necessary to perform a compare-and-swap operation.
 	//
 	// It must return [ErrLogNotFound] if the log doesn't exist.
-	Fetch(ctx context.Context, logID [sha256.Size]byte) (LockedCheckpoint, error)
+	Fetch(ctx context.Context, origin string) (LockedCheckpoint, error)
 
 	// Replace uploads a new checkpoint, atomically checking that the old
 	// checkpoint is the provided one, and returning the new one. Replace is
@@ -43,7 +42,7 @@ type LockBackend interface {
 
 	// Create uploads a new checkpoint, atomically checking that none exist for
 	// the log yet.
-	Create(ctx context.Context, logID [sha256.Size]byte, new []byte) error
+	Create(ctx context.Context, origin string, new []byte) error
 
 	// Since a LockBackend is intended to be shared across logs, its metrics
 	// should be collected by the application, not by the Log.
@@ -75,7 +74,7 @@ func NewSQLiteBackend(ctx context.Context, path string, l *slog.Logger) (*SQLite
 
 	conn, err := sqlite.OpenConn(path, sqlite.OpenReadWrite|sqlite.OpenWAL|sqlite.OpenURI)
 	if err != nil {
-		return nil, fmt.Errorf(`failed to open SQLite lock database (hint: to avoid misconfiguration, the lock database must be created manually with "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body BLOB NOT NULL) STRICT"): %w`, err)
+		return nil, fmt.Errorf(`failed to open SQLite lock database (hint: to avoid misconfiguration, the lock database must be created manually with "CREATE TABLE locks (origin TEXT PRIMARY KEY, body BLOB NOT NULL) STRICT"): %w`, err)
 	}
 	if err := sqlitex.ExecuteTransient(conn, "PRAGMA synchronous = FULL", nil); err != nil {
 		conn.Close()
@@ -97,20 +96,20 @@ func NewSQLiteBackend(ctx context.Context, path string, l *slog.Logger) (*SQLite
 var _ LockBackend = &SQLiteBackend{}
 
 type sqliteCheckpoint struct {
-	body  []byte
-	logID [sha256.Size]byte
+	body   []byte
+	origin string
 }
 
 func (c *sqliteCheckpoint) Bytes() []byte { return c.body }
 
 var _ LockedCheckpoint = &sqliteCheckpoint{}
 
-func (b *SQLiteBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (LockedCheckpoint, error) {
+func (b *SQLiteBackend) Fetch(ctx context.Context, origin string) (LockedCheckpoint, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var body []byte
-	err := sqlitex.Execute(b.conn, "SELECT body FROM checkpoints WHERE logID = ?", &sqlitex.ExecOptions{
-		Args: []any{logID[:]},
+	err := sqlitex.Execute(b.conn, "SELECT body FROM locks WHERE origin = ?", &sqlitex.ExecOptions{
+		Args: []any{origin},
 		ResultFunc: func(stmt *sqlite.Stmt) error {
 			body = make([]byte, stmt.GetLen("body"))
 			stmt.GetBytes("body", body)
@@ -123,7 +122,7 @@ func (b *SQLiteBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (Loc
 	if body == nil {
 		return nil, ErrLogNotFound
 	}
-	return &sqliteCheckpoint{logID: logID, body: body}, nil
+	return &sqliteCheckpoint{origin: origin, body: body}, nil
 }
 
 func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new []byte) (LockedCheckpoint, error) {
@@ -135,8 +134,8 @@ func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new [
 		new = []byte{}
 	}
 	o := old.(*sqliteCheckpoint)
-	err := sqlitex.Execute(b.conn, "UPDATE checkpoints SET body = ? WHERE logID = ? AND body = ?",
-		&sqlitex.ExecOptions{Args: []any{new, o.logID[:], o.body}})
+	err := sqlitex.Execute(b.conn, "UPDATE locks SET body = ? WHERE origin = ? AND body = ?",
+		&sqlitex.ExecOptions{Args: []any{new, o.origin, o.body}})
 	if err != nil {
 		return nil, acmeerrors.Internal("failed to update SQLite checkpoint: %w", err)
 	}
@@ -144,18 +143,18 @@ func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new [
 		// TODO: this also hits if new == old.body, and shouldn't.
 		return nil, acmeerrors.Internal("SQLite checkpoint not found or has changed")
 	}
-	return &sqliteCheckpoint{logID: o.logID, body: new}, nil
+	return &sqliteCheckpoint{origin: o.origin, body: new}, nil
 }
 
-func (b *SQLiteBackend) Create(ctx context.Context, logID [sha256.Size]byte, new []byte) error {
+func (b *SQLiteBackend) Create(ctx context.Context, origin string, new []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if new == nil {
 		// NULL does *not* compare equal to an empty blob!
 		new = []byte{}
 	}
-	err := sqlitex.Execute(b.conn, `INSERT INTO checkpoints (logID, body) VALUES (?, ?)
-		ON CONFLICT(logID) DO NOTHING`, &sqlitex.ExecOptions{Args: []any{logID[:], new}})
+	err := sqlitex.Execute(b.conn, `INSERT INTO locks (origin, body) VALUES (?, ?)
+		ON CONFLICT(origin) DO NOTHING`, &sqlitex.ExecOptions{Args: []any{origin, new}})
 	if err != nil {
 		return fmt.Errorf("failed to create checkpoint: %w", err)
 	}
