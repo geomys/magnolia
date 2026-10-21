@@ -25,7 +25,7 @@ type CA struct {
 	nonceIssuer *nonce.Issuer
 	nonceSpent  *nonce.Spent
 	accounts    *accountStore
-	orders      sync.Map // id string => *order
+	orders      sync.Map // id string => *[order]
 }
 
 type Config struct {
@@ -259,7 +259,7 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 			return nil, acmeerrors.New("unsupportedIdentifier", 400, "only dns identifiers are supported")
 		}
 		if seen[id.Value] {
-			return nil, acmeerrors.New("malformed", 400, "duplicate identifier "+id.Value)
+			return nil, acmeerrors.New("malformed", 400, "duplicate identifier %s", id.Value)
 		}
 		seen[id.Value] = true
 		// TODO: validate the identifier!

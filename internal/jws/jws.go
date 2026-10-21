@@ -78,7 +78,7 @@ type mldsaJWK struct {
 func ParseJWK(data []byte) (*mldsa.PublicKey, acmeerrors.Error) {
 	var k mldsaJWK
 	if err := json.Unmarshal(data, &k, jsonOptions); err != nil {
-		return nil, acmeerrors.New("badPublicKey", 400, "failed to parse JWK:", err.Error())
+		return nil, acmeerrors.New("badPublicKey", 400, "failed to parse JWK: %w", err)
 	}
 	return k.publicKey()
 }
@@ -93,7 +93,7 @@ func (k *mldsaJWK) publicKey() (*mldsa.PublicKey, acmeerrors.Error) {
 	}
 	pub, e := mldsa.NewPublicKey(params, k.Pub)
 	if e != nil {
-		return nil, acmeerrors.New("badPublicKey", 400, "invalid public key:", e.Error())
+		return nil, acmeerrors.New("badPublicKey", 400, "invalid public key: %w", e)
 	}
 	return pub, nil
 }
@@ -117,11 +117,11 @@ type Unverified struct {
 func Parse(jws []byte) (*Unverified, acmeerrors.Error) {
 	var f flattenedJWS
 	if err := json.Unmarshal(jws, &f, jsonOptions); err != nil {
-		return nil, acmeerrors.New("malformed", 400, "failed to parse JSON:", err.Error())
+		return nil, acmeerrors.New("malformed", 400, "failed to parse JSON: %w", err)
 	}
 	var h header
 	if err := json.Unmarshal([]byte(f.Protected), &h, jsonOptions); err != nil {
-		return nil, acmeerrors.New("malformed", 400, "failed to parse header:", err.Error())
+		return nil, acmeerrors.New("malformed", 400, "failed to parse header: %w", err)
 	}
 	if h.JWK != nil && h.KID != "" {
 		return nil, acmeerrors.New("malformed", 400, "KID and JWK are mutually exclusive")
@@ -194,7 +194,7 @@ func (u *Unverified) Verify(pub *mldsa.PublicKey) (*JWS, acmeerrors.Error) {
 	signed = append(signed, '.')
 	signed = append(signed, base64.RawURLEncoding.EncodeToString(u.payload)...)
 	if err := mldsa.Verify(pub, signed, u.signature, nil); err != nil {
-		return nil, acmeerrors.New("unauthorized", 403, "signature verification failed:", err.Error())
+		return nil, acmeerrors.New("unauthorized", 403, "signature verification failed: %w", err)
 	}
 	return &JWS{
 		Nonce:   u.nonce,
@@ -212,7 +212,7 @@ func algToParameters(alg string) (mldsa.Parameters, acmeerrors.Error) {
 	case "ML-DSA-87":
 		return mldsa.MLDSA87(), nil
 	default:
-		err := acmeerrors.New("badSignatureAlgorithm", 400, "unsupported algorithm:", alg)
+		err := acmeerrors.New("badSignatureAlgorithm", 400, "unsupported algorithm: %s", alg)
 		err = err.WithField("algorithms", []string{"ML-DSA-44", "ML-DSA-65", "ML-DSA-87"})
 		return mldsa.Parameters{}, err
 	}

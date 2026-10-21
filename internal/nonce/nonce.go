@@ -70,7 +70,7 @@ func newUUIDv7(t time.Time) uuid.UUID {
 func (i *Issuer) Verify(nonce string) (uuid.UUID, acmeerrors.Error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(nonce)
 	if err != nil {
-		return uuid.Nil(), acmeerrors.New("badNonce", 400, "failed to decode nonce:", err.Error())
+		return uuid.Nil(), acmeerrors.New("badNonce", 400, "failed to decode nonce: %w", err)
 	}
 	if len(decoded) != 17+16 {
 		return uuid.Nil(), acmeerrors.New("badNonce", 400, "invalid nonce length")
