@@ -25,6 +25,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
+	"zombiezen.com/go/sqlite"
+	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 const tileWidth = torchwood.TileWidth
@@ -34,7 +36,7 @@ const evidenceOrigin = "example.com/TestLogs/evidence"
 
 type TestLogs struct {
 	Logs   *lockstep.Logs
-	Config lockstep.Config
+	Config testConfig
 	t      testing.TB
 	l      *slog.LevelVar
 
@@ -50,17 +52,151 @@ type sequencedEntries struct {
 	m  map[int64]*lockstep.PendingLogEntry
 }
 
-func newTestConfig(t testing.TB) lockstep.Config {
+// testConfig is a [lockstep.Config] that uses a [lockstep.SQLiteSigner], with
+// the database and keys exposed so that tests can inspect and corrupt the
+// signer state.
+type testConfig struct {
+	lockstep.Config
+	t               testing.TB
+	DBPath          string
+	IssuanceSigners []*torchwood.CosignatureSigner
+	EvidenceSigners []*torchwood.CosignatureSigner
+
+	// Faults is shared by all the signers built from this config.
+	Faults *signerFaults
+}
+
+func newTestConfig(t testing.TB) testConfig {
 	t.Helper()
-	return lockstep.Config{
-		Logger:          slog.New(testLogHandler(t)),
-		Backend:         NewMemoryBackend(t),
-		Lock:            NewMemoryLockBackend(t),
-		IssuanceOrigin:  issuanceOrigin,
+	return testConfig{
+		Config: lockstep.Config{
+			Logger:         slog.New(testLogHandler(t)),
+			Backend:        NewMemoryBackend(t),
+			IssuanceOrigin: issuanceOrigin,
+			EvidenceOrigin: evidenceOrigin,
+		},
+		t:               t,
+		DBPath:          newTestDB(t),
 		IssuanceSigners: []*torchwood.CosignatureSigner{newTestSigner(t, issuanceOrigin)},
-		EvidenceOrigin:  evidenceOrigin,
 		EvidenceSigners: []*torchwood.CosignatureSigner{newTestSigner(t, evidenceOrigin)},
+		Faults:          &signerFaults{},
 	}
+}
+
+// build returns the [lockstep.Config] with a new signer, and verifiers for the
+// current database and keys.
+func (c testConfig) build() lockstep.Config {
+	t := c.t
+	t.Helper()
+	s, err := lockstep.NewSQLiteSigner(context.Background(), c.DBPath, c.Logger,
+		c.IssuanceOrigin, c.IssuanceSigners, c.EvidenceOrigin, c.EvidenceSigners)
+	fatalIfErr(t, err)
+	t.Cleanup(func() { s.Close() })
+	config := c.Config
+	config.Signer = &faultySigner{s, c.Faults}
+	config.IssuanceVerifiers = verifiers(c.IssuanceSigners)
+	config.EvidenceVerifiers = verifiers(c.EvidenceSigners)
+	return config
+}
+
+func newTestDB(t testing.TB) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "lock.db")
+	conn, err := sqlite.OpenConn(path, sqlite.OpenReadWrite|sqlite.OpenCreate)
+	fatalIfErr(t, err)
+	defer conn.Close()
+	fatalIfErr(t, sqlitex.ExecuteTransient(conn,
+		"CREATE TABLE locks (origin TEXT PRIMARY KEY, body BLOB NOT NULL) STRICT", nil))
+	return path
+}
+
+// lockRow returns the signer database row holding both checkpoints.
+func lockRow(t testing.TB, path string) []byte {
+	t.Helper()
+	conn, err := sqlite.OpenConn(path, sqlite.OpenReadWrite)
+	fatalIfErr(t, err)
+	defer conn.Close()
+	var body []byte
+	fatalIfErr(t, sqlitex.Execute(conn, "SELECT body FROM locks WHERE origin = ?", &sqlitex.ExecOptions{
+		Args: []any{issuanceOrigin},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			body = make([]byte, stmt.GetLen("body"))
+			stmt.GetBytes("body", body)
+			return nil
+		},
+	}))
+	if body == nil {
+		t.Fatal("lock row not found")
+	}
+	return body
+}
+
+// setLockRow overwrites the signer database row holding both checkpoints.
+func setLockRow(t testing.TB, path string, b []byte) {
+	t.Helper()
+	conn, err := sqlite.OpenConn(path, sqlite.OpenReadWrite)
+	fatalIfErr(t, err)
+	defer conn.Close()
+	fatalIfErr(t, sqlitex.Execute(conn, "UPDATE locks SET body = ? WHERE origin = ?",
+		&sqlitex.ExecOptions{Args: []any{b, issuanceOrigin}}))
+	if conn.Changes() != 1 {
+		t.Fatal("lock row not found")
+	}
+}
+
+type signerFaults struct {
+	// UpdateCallback, if set, is called before every Update. If apply is
+	// false, the update is not performed. The returned error is returned by
+	// Update in any case.
+	UpdateCallback func() (apply bool, err error)
+
+	// UpdateResult, if set, replaces the checkpoints returned by successful
+	// updates, which are still applied.
+	UpdateResult func(issuance, evidence []byte) ([]byte, []byte)
+}
+
+type faultySigner struct {
+	lockstep.CheckpointSigner
+	faults *signerFaults
+}
+
+func (s *faultySigner) Update(ctx context.Context, u lockstep.CheckpointUpdate) (issuance, evidence []byte, err error) {
+	var finalErr error
+	if s.faults.UpdateCallback != nil {
+		apply, err := s.faults.UpdateCallback()
+		finalErr = err
+		if !apply {
+			return nil, nil, finalErr
+		}
+	}
+	issuance, evidence, err = s.CheckpointSigner.Update(ctx, u)
+	if err != nil {
+		return nil, nil, err
+	}
+	if finalErr != nil {
+		return nil, nil, finalErr
+	}
+	if s.faults.UpdateResult != nil {
+		issuance, evidence = s.faults.UpdateResult(issuance, evidence)
+	}
+	return issuance, evidence, nil
+}
+
+// failUpdate returns an UpdateCallback that fails every update. If persist is
+// true, the update is applied anyway, simulating an error after the write went
+// through, such as a response timeout.
+func failUpdate(persist bool) func() (apply bool, err error) {
+	return func() (apply bool, err error) {
+		return persist, errors.New("signer update error")
+	}
+}
+
+func verifiers(signers []*torchwood.CosignatureSigner) []note.Verifier {
+	var verifiers []note.Verifier
+	for _, s := range signers {
+		verifiers = append(verifiers, s.Verifier())
+	}
+	return verifiers
 }
 
 func newTestSigner(t testing.TB, name string) *torchwood.CosignatureSigner {
@@ -78,16 +214,16 @@ func NewEmptyTestLogs(t testing.TB) *TestLogs {
 	return NewEmptyTestLogsWithConfig(t, newTestConfig(t))
 }
 
-func NewEmptyTestLogsWithConfig(t testing.TB, config lockstep.Config) *TestLogs {
+func NewEmptyTestLogsWithConfig(t testing.TB, config testConfig) *TestLogs {
 	t.Helper()
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(slog.LevelDebug)
 	config.Logger = slog.New(&levelHandler{config.Logger.Handler(), logLevel})
-	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config))
+	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build()))
 	tl := &TestLogs{t: t, Config: config, l: logLevel,
 		sequenced: &sequencedEntries{m: make(map[int64]*lockstep.PendingLogEntry)}}
 	tl.CheckLog(0)
-	logs, err := lockstep.LoadLogs(context.Background(), config)
+	logs, err := lockstep.LoadLogs(context.Background(), config.build())
 	fatalIfErr(t, err)
 	tl.Logs = logs
 	tl.CheckLog(0)
@@ -142,7 +278,7 @@ func (tl *TestLogs) Quiet() {
 
 func ReloadLogs(t testing.TB, tl *TestLogs) *TestLogs {
 	t.Helper()
-	logs, err := lockstep.LoadLogs(context.Background(), tl.Config)
+	logs, err := lockstep.LoadLogs(context.Background(), tl.Config.build())
 	fatalIfErr(t, err)
 	return &TestLogs{t: t,
 		Logs:      logs,
@@ -172,13 +308,11 @@ func (tl *TestLogs) sides() [2]logSide {
 }
 
 // lockCheckpoints returns the issuance and evidence checkpoints committed to
-// the lock backend.
+// the signer database.
 func (tl *TestLogs) lockCheckpoints() (ic, ec torchwood.Checkpoint) {
 	t := tl.t
 	t.Helper()
-	lock, err := tl.Config.Lock.Fetch(context.Background(), tl.Config.IssuanceOrigin)
-	fatalIfErr(t, err)
-	ib, eb, err := lockstep.SplitLockCheckpoints(lock.Bytes())
+	ib, eb, err := lockstep.SplitLockCheckpoints(lockRow(t, tl.Config.DBPath))
 	fatalIfErr(t, err)
 	ic = openCheckpoint(t, tl.Config.IssuanceOrigin, tl.Config.IssuanceSigners, ib)
 	ec = openCheckpoint(t, tl.Config.EvidenceOrigin, tl.Config.EvidenceSigners, eb)
@@ -299,11 +433,7 @@ func (tl *TestLogs) checkSide(side logSide, lockCheckpoint torchwood.Checkpoint)
 
 func openCheckpoint(t testing.TB, origin string, signers []*torchwood.CosignatureSigner, b []byte) torchwood.Checkpoint {
 	t.Helper()
-	var verifiers []note.Verifier
-	for _, s := range signers {
-		verifiers = append(verifiers, s.Verifier())
-	}
-	n, err := note.Open(b, note.VerifierList(verifiers...))
+	n, err := note.Open(b, note.VerifierList(verifiers(signers)...))
 	fatalIfErr(t, err)
 	if len(n.Sigs) != len(signers) {
 		t.Errorf("checkpoint has %d signatures, want %d", len(n.Sigs), len(signers))
@@ -556,91 +686,6 @@ func (b *MemoryBackend) Discard(ctx context.Context, key string) error {
 }
 
 func (b *MemoryBackend) Metrics() []prometheus.Collector { return nil }
-
-type MemoryLockBackend struct {
-	t  testing.TB
-	mu sync.Mutex
-	m  map[string][]byte
-
-	ReplaceCallback func(old lockstep.LockedCheckpoint, new []byte) (apply bool, err error)
-}
-
-type memoryLockCheckpoint struct {
-	origin string
-	data   []byte
-}
-
-func (c *memoryLockCheckpoint) Bytes() []byte {
-	return c.data
-}
-
-func NewMemoryLockBackend(t testing.TB) *MemoryLockBackend {
-	return &MemoryLockBackend{
-		t: t, m: make(map[string][]byte),
-	}
-}
-
-func (b *MemoryLockBackend) Fetch(ctx context.Context, origin string) (lockstep.LockedCheckpoint, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	data, ok := b.m[origin]
-	if !ok {
-		return nil, lockstep.ErrLogNotFound
-	}
-	return &memoryLockCheckpoint{origin: origin, data: data}, nil
-}
-
-func (b *MemoryLockBackend) Create(ctx context.Context, origin string, new []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.m[origin]; ok {
-		return fmt.Errorf("log %q already exists", origin)
-	}
-	b.m[origin] = new
-	return nil
-}
-
-func (b *MemoryLockBackend) Replace(ctx context.Context, old lockstep.LockedCheckpoint, new []byte) (lockstep.LockedCheckpoint, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	var finalErr error
-	if b.ReplaceCallback != nil {
-		apply, err := b.ReplaceCallback(old, new)
-		finalErr = err
-		if !apply {
-			return nil, finalErr
-		}
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if old == nil {
-		b.t.Errorf("Replace called with nil old checkpoint")
-		return nil, fmt.Errorf("old checkpoint is nil")
-	}
-	oldc := old.(*memoryLockCheckpoint)
-	if current, ok := b.m[oldc.origin]; !ok {
-		return nil, fmt.Errorf("log %q not found", oldc.origin)
-	} else if !bytes.Equal(current, oldc.data) {
-		return nil, fmt.Errorf("log %q has changed", oldc.origin)
-	}
-	b.m[oldc.origin] = new
-	return &memoryLockCheckpoint{origin: oldc.origin, data: new}, finalErr
-}
-
-// failLock returns a ReplaceCallback that fails every update. If persist is
-// true, the update is applied anyway.
-func failLock(persist bool) func(old lockstep.LockedCheckpoint, new []byte) (apply bool, err error) {
-	return func(old lockstep.LockedCheckpoint, new []byte) (apply bool, err error) {
-		return persist, errors.New("lock replace error")
-	}
-}
 
 func fatalIfErr(t testing.TB, err error) {
 	t.Helper()

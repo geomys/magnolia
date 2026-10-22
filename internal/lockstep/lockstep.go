@@ -5,10 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
@@ -17,7 +13,6 @@ import (
 	"log/slog"
 	"maps"
 	mathrand "math/rand/v2"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -32,14 +27,14 @@ import (
 type Config struct {
 	Logger  *slog.Logger
 	Backend Backend
-	Lock    LockBackend
+	Signer  CheckpointSigner
 
 	PoolSize int
 
-	IssuanceOrigin  string
-	IssuanceSigners []*torchwood.CosignatureSigner
-	EvidenceOrigin  string
-	EvidenceSigners []*torchwood.CosignatureSigner
+	IssuanceOrigin    string
+	IssuanceVerifiers []note.Verifier
+	EvidenceOrigin    string
+	EvidenceVerifiers []note.Verifier
 }
 
 func (c *Config) validate() error {
@@ -49,8 +44,8 @@ func (c *Config) validate() error {
 	if c.IssuanceOrigin == c.EvidenceOrigin {
 		return errors.New("issuance and evidence logs must have different origins")
 	}
-	if len(c.IssuanceSigners) == 0 || len(c.EvidenceSigners) == 0 {
-		return errors.New("logs must have at least one signer")
+	if len(c.IssuanceVerifiers) == 0 || len(c.EvidenceVerifiers) == 0 {
+		return errors.New("logs must have at least one verifier")
 	}
 	return nil
 }
@@ -58,10 +53,9 @@ func (c *Config) validate() error {
 type Logs struct {
 	c Config
 
-	// issuanceLog, evidenceLog, and lockCheckpoint are owned by sequencePool.
-	issuanceLog    tlogState
-	evidenceLog    tlogState
-	lockCheckpoint LockedCheckpoint
+	// issuanceLog and evidenceLog are owned by sequencePool.
+	issuanceLog tlogState
+	evidenceLog tlogState
 
 	// poolGate is acquired by AddLeaf before poolMu, while the sequencer
 	// takes poolMu directly, so that sequencing doesn't have to queue behind
@@ -108,35 +102,29 @@ func CreateLogs(ctx context.Context, config Config) error {
 	if err := config.validate(); err != nil {
 		return err
 	}
-	_, err := config.Lock.Fetch(ctx, config.IssuanceOrigin)
+	_, _, err := config.Signer.Checkpoints(ctx)
 	if err == nil {
 		return ErrLogExists
 	}
 	if !errors.Is(err, ErrLogNotFound) {
-		return fmt.Errorf("couldn't fetch checkpoints from lock database: %w", err)
+		return fmt.Errorf("couldn't fetch checkpoints from signer: %w", err)
 	}
 	if _, err := config.Backend.Fetch(ctx, "issuance/checkpoint"); err == nil {
-		return fmt.Errorf("issuance checkpoint missing from database but present in object storage")
+		return fmt.Errorf("issuance checkpoint missing from signer but present in object storage")
 	}
 	if _, err := config.Backend.Fetch(ctx, "evidence/checkpoint"); err == nil {
-		return fmt.Errorf("evidence checkpoint missing from database but present in object storage")
+		return fmt.Errorf("evidence checkpoint missing from signer but present in object storage")
 	}
 
-	tree, err := hashTreeHead(0, nil)
+	ic, ec, err := config.Signer.Create(ctx)
 	if err != nil {
-		return fmt.Errorf("couldn't compute empty tree head: %w", err)
+		return fmt.Errorf("couldn't create checkpoints: %w", err)
 	}
-	ic, err := signCheckpoint(config.IssuanceOrigin, signers(config.IssuanceSigners), tree)
-	if err != nil {
-		return fmt.Errorf("couldn't sign empty issuance tree head: %w", err)
+	if _, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceVerifiers, ic); err != nil {
+		return fmt.Errorf("couldn't open created issuance checkpoint: %w", err)
 	}
-	ec, err := signCheckpoint(config.EvidenceOrigin, signers(config.EvidenceSigners), tree)
-	if err != nil {
-		return fmt.Errorf("couldn't sign empty evidence tree head: %w", err)
-	}
-
-	if err := config.Lock.Create(ctx, config.IssuanceOrigin, joinLockCheckpoints(ic, ec)); err != nil {
-		return fmt.Errorf("couldn't create checkpoints in lock database: %w", err)
+	if _, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceVerifiers, ec); err != nil {
+		return fmt.Errorf("couldn't open created evidence checkpoint: %w", err)
 	}
 	if err := config.Backend.Upload(ctx, "issuance/checkpoint", ic, optsCheckpoint); err != nil {
 		return fmt.Errorf("couldn't upload issuance checkpoint: %w", err)
@@ -155,24 +143,21 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 		return nil, err
 	}
 
-	// Load the checkpoints from the lock database. If we crashed during
-	// serialization, the ones in the lock database are going to be the latest.
-	lock, err := config.Lock.Fetch(ctx, config.IssuanceOrigin)
+	// Load the checkpoints from the signer. If we crashed during
+	// serialization, the ones from the signer are going to be the latest.
+	latestIssuance, latestEvidence, err := config.Signer.Checkpoints(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch checkpoints from lock database: %w", err)
+		return nil, fmt.Errorf("couldn't fetch checkpoints from signer: %w", err)
 	}
-	config.Logger.DebugContext(ctx, "loaded checkpoints", "checkpoints", lock.Bytes())
-	issuanceLock, evidenceLock, err := splitLockCheckpoints(lock.Bytes())
+	config.Logger.DebugContext(ctx, "loaded checkpoints from signer",
+		"issuance", latestIssuance, "evidence", latestEvidence)
+	ic, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceVerifiers, latestIssuance)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't split checkpoints from lock database: %w", err)
+		return nil, fmt.Errorf("couldn't open issuance checkpoint from signer: %w", err)
 	}
-	ic, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceSigners, issuanceLock)
+	ec, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceVerifiers, latestEvidence)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't open issuance checkpoint from lock database: %w", err)
-	}
-	ec, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceSigners, evidenceLock)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't open evidence checkpoint from lock database: %w", err)
+		return nil, fmt.Errorf("couldn't open evidence checkpoint from signer: %w", err)
 	}
 
 	// Load the checkpoints from the object storage backend, verify them, and
@@ -182,7 +167,7 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 		return nil, fmt.Errorf("couldn't fetch issuance checkpoint from object storage: %w", err)
 	}
 	config.Logger.DebugContext(ctx, "loaded issuance checkpoint from object storage", "checkpoint", issuanceCheckpoint)
-	ic1, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceSigners, issuanceCheckpoint)
+	ic1, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceVerifiers, issuanceCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't open issuance checkpoint from object storage: %w", err)
 	}
@@ -191,7 +176,7 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 		return nil, fmt.Errorf("couldn't fetch evidence checkpoint from object storage: %w", err)
 	}
 	config.Logger.DebugContext(ctx, "loaded evidence checkpoint from object storage", "checkpoint", evidenceCheckpoint)
-	ec1, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceSigners, evidenceCheckpoint)
+	ec1, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceVerifiers, evidenceCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't open evidence checkpoint from object storage: %w", err)
 	}
@@ -296,41 +281,18 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 			tree:      ec.Tree,
 			edgeTiles: edgeTiles[1],
 		},
-		lockCheckpoint: lock,
-		poolGate:       make(chan struct{}, 1),
-		currentPool:    newPool(),
+		poolGate:    make(chan struct{}, 1),
+		currentPool: newPool(),
 	}, nil
 }
 
-// joinLockCheckpoints encodes the issuance and evidence checkpoints as a single
-// lock database entry, so that they are always updated atomically.
-func joinLockCheckpoints(ic, ec []byte) []byte {
-	return slices.Concat(ic, []byte("\n"), ec)
-}
-
-func splitLockCheckpoints(b []byte) (ic, ec []byte, err error) {
-	body, rest, ok := bytes.Cut(b, []byte("\n\n"))
-	if !ok {
-		return nil, nil, errors.New("missing issuance checkpoint signatures")
-	}
-	sigs, ec, ok := bytes.Cut(rest, []byte("\n\n"))
-	if !ok {
-		return nil, nil, errors.New("missing evidence checkpoint")
-	}
-	return b[:len(body)+len("\n\n")+len(sigs)+len("\n")], ec, nil
-}
-
-func openCheckpoint(origin string, signers []*torchwood.CosignatureSigner, b []byte) (torchwood.Checkpoint, error) {
-	var verifiers []note.Verifier
-	for _, s := range signers {
-		verifiers = append(verifiers, s.Verifier())
-	}
+func openCheckpoint(origin string, verifiers []note.Verifier, b []byte) (torchwood.Checkpoint, error) {
 	n, err := note.Open(b, note.VerifierList(verifiers...))
 	if err != nil {
 		return torchwood.Checkpoint{}, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
-	if len(n.Sigs) != len(signers) {
-		return torchwood.Checkpoint{}, fmt.Errorf("expected %d cosignatures, got %d", len(signers), len(n.Sigs))
+	if len(n.Sigs) != len(verifiers) {
+		return torchwood.Checkpoint{}, fmt.Errorf("expected %d cosignatures, got %d", len(verifiers), len(n.Sigs))
 	}
 	c, err := torchwood.ParseCheckpoint(n.Text)
 	if err != nil {
@@ -533,7 +495,9 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	defer cancel()
 
 	var tileUploads []*uploadAction
-	var newStates [2]tlogState // 0: issuanceLog, 1: evidenceLog
+	// 0: issuanceLog, 1: evidenceLog
+	var newStates [2]tlogState
+	var proofs [2]tlog.TreeProof
 	pendingLeaf := [2]func(p *PendingLogEntry) []byte{
 		func(p *PendingLogEntry) []byte { return p.IssuanceLeaf },
 		func(p *PendingLogEntry) []byte { return p.EvidenceLeaf },
@@ -625,6 +589,12 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 		if err != nil {
 			return acmeerrors.Internal("couldn't compute tree head: %w", err)
 		}
+		if l.tree.N > 0 {
+			proofs[i], err = tlog.ProveTree(n, l.tree.N, hashReader)
+			if err != nil {
+				return acmeerrors.Internal("couldn't compute consistency proof: %w", err)
+			}
+		}
 
 		newState.tree = tree
 		newState.edgeTiles = edgeTiles
@@ -663,30 +633,40 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 		}
 	}
 
-	issuanceCheckpoint, err := signCheckpoint(ls.c.IssuanceOrigin, signers(ls.c.IssuanceSigners), newStates[0].tree)
-	if err != nil {
-		return acmeerrors.Internal("couldn't sign checkpoint: %w", err)
-	}
-	evidenceCheckpoint, err := signCheckpoint(ls.c.EvidenceOrigin, signers(ls.c.EvidenceSigners), newStates[1].tree)
-	if err != nil {
-		return acmeerrors.Internal("couldn't sign checkpoint: %w", err)
-	}
-	lock, e := ls.c.Lock.Replace(ctx, ls.lockCheckpoint, joinLockCheckpoints(issuanceCheckpoint, evidenceCheckpoint))
+	issuanceCheckpoint, evidenceCheckpoint, e := ls.c.Signer.Update(ctx, CheckpointUpdate{
+		OldSize:     oldSize,
+		First:       newStates[0].tree,
+		FirstProof:  proofs[0],
+		Second:      newStates[1].tree,
+		SecondProof: proofs[1],
+	})
 	if e != nil {
 		// This is a critical error, since we don't know the state of the
-		// checkpoints in the database at this point. Bail and let [LoadLogs] get
+		// checkpoints in the signer at this point. Bail and let [LoadLogs] get
 		// us to a good state after restart.
-		return acmeerrors.Internal("%w: couldn't upload checkpoints to database: %w", errFatal, e)
+		return acmeerrors.Internal("%w: couldn't update checkpoints: %w", errFatal, e)
+	}
+	// Check the signer output before publishing it.
+	if c, err := openCheckpoint(ls.c.IssuanceOrigin, ls.c.IssuanceVerifiers, issuanceCheckpoint); err != nil {
+		return acmeerrors.Internal("%w: couldn't open issuance checkpoint from signer: %w", errFatal, err)
+	} else if c.Tree != newStates[0].tree {
+		return acmeerrors.Internal("%w: signer returned issuance checkpoint for %d %v, expected %d %v", errFatal,
+			c.N, c.Hash, newStates[0].tree.N, newStates[0].tree.Hash)
+	}
+	if c, err := openCheckpoint(ls.c.EvidenceOrigin, ls.c.EvidenceVerifiers, evidenceCheckpoint); err != nil {
+		return acmeerrors.Internal("%w: couldn't open evidence checkpoint from signer: %w", errFatal, err)
+	} else if c.Tree != newStates[1].tree {
+		return acmeerrors.Internal("%w: signer returned evidence checkpoint for %d %v, expected %d %v", errFatal,
+			c.N, c.Hash, newStates[1].tree.N, newStates[1].tree.Hash)
 	}
 
 	// At this point the pool is fully serialized: new entries were persisted to
 	// object storage (in staging) and the checkpoint was committed to the
-	// database. If we were to crash after this, recovery would be clean from
-	// database and object storage.
+	// signer. If we were to crash after this, recovery would be clean from
+	// signer and object storage.
 	p.firstLeafIndex = oldTree.N
 	ls.issuanceLog = newStates[0]
 	ls.evidenceLog = newStates[1]
-	ls.lockCheckpoint = lock
 
 	// Use applyStagedUploads instead of going over tileUploads directly, to
 	// exercise the same code path as [LoadLogs].
@@ -726,14 +706,6 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 var testingOnlyPauseSequencing func()
 var testingOnlyPauseAddLeaf func()
 var testingOnlyPoolSwapped func()
-
-func signers(s []*torchwood.CosignatureSigner) []note.Signer {
-	signers := make([]note.Signer, len(s))
-	for i, cs := range s {
-		signers[i] = cs
-	}
-	return signers
-}
 
 type uploadAction struct {
 	key  string
@@ -811,50 +783,6 @@ func stagingPath(tree1, tree2 tlog.Tree) string {
 	// staging bundles are deleted from the local backend (where it would be
 	// important not to make a directory listing too long).
 	return fmt.Sprintf("staging/%d-%s-%s", tree1.N, hex.EncodeToString(tree1.Hash[:]), hex.EncodeToString(tree2.Hash[:]))
-}
-
-// signCheckpoint signs the tree and returns a c2sp.org/checkpoint.
-func signCheckpoint(origin string, signers []note.Signer, tree tlog.Tree) ([]byte, acmeerrors.Error) {
-	// Randomize the order to enforce forward-compatible client behavior.
-	signers = slices.Clone(signers)
-	mathrand.Shuffle(len(signers), func(i, j int) { signers[i], signers[j] = signers[j], signers[i] })
-
-	signedNote, err := note.Sign(&note.Note{
-		Text: torchwood.Checkpoint{
-			Origin: origin, N: tree.N, Hash: tree.Hash,
-		}.String(),
-		UnverifiedSigs: greaseSignatures(signers),
-	}, signers...)
-	if err != nil {
-		return nil, acmeerrors.Internal("couldn't sign note: %w", err)
-	}
-	return signedNote, nil
-}
-
-// greaseSignatures produces unverifiable but otherwise correct signatures.
-// Clients MUST ignore unknown signatures, and including some "grease" ones
-// ensures they do.
-func greaseSignatures(signers []note.Signer) []note.Signature {
-	g := make([]byte, 5+mathrand.IntN(100))
-	rand.Read(g)
-	signatures := []note.Signature{
-		{Name: "grease.invalid", Hash: binary.BigEndian.Uint32(g), Base64: base64.StdEncoding.EncodeToString(g)},
-	}
-	for _, s := range signers {
-		g := make([]byte, 5+mathrand.IntN(100))
-		h := sha256.Sum256(append([]byte("grease\n"), byte(mathrand.IntN(100))))
-		copy(g[:4], h[:])
-		rand.Read(g[4:])
-		keyHash := binary.BigEndian.Uint32(g)
-		if keyHash == s.KeyHash() {
-			continue
-		}
-		signatures = append(signatures, note.Signature{
-			Name: s.Name(), Hash: keyHash, Base64: base64.StdEncoding.EncodeToString(g),
-		})
-	}
-	mathrand.Shuffle(len(signatures), func(i, j int) { signatures[i], signatures[j] = signatures[j], signatures[i] })
-	return signatures
 }
 
 // edgeTilesHashReader returns hashes from l.edgeTiles.

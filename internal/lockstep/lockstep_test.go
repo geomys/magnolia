@@ -21,8 +21,6 @@ import (
 	"geomys.org/magnolia/internal/acmeerrors"
 	"geomys.org/magnolia/internal/lockstep"
 	"golang.org/x/mod/sumdb/tlog"
-	"zombiezen.com/go/sqlite"
-	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 var longFlag = flag.Bool("long", false, "run especially slow tests")
@@ -540,30 +538,30 @@ func TestReloadWrongConfig(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		mutate func(c *lockstep.Config)
+		mutate func(c *testConfig)
 	}{
-		{"IssuanceOrigin", func(c *lockstep.Config) { c.IssuanceOrigin = "wrong" }},
-		{"EvidenceOrigin", func(c *lockstep.Config) { c.EvidenceOrigin = "wrong" }},
-		{"SwappedOrigins", func(c *lockstep.Config) {
+		{"IssuanceOrigin", func(c *testConfig) { c.IssuanceOrigin = "wrong" }},
+		{"EvidenceOrigin", func(c *testConfig) { c.EvidenceOrigin = "wrong" }},
+		{"SwappedOrigins", func(c *testConfig) {
 			c.IssuanceOrigin, c.EvidenceOrigin = c.EvidenceOrigin, c.IssuanceOrigin
 		}},
-		{"IssuanceKey", func(c *lockstep.Config) {
+		{"IssuanceKey", func(c *testConfig) {
 			c.IssuanceSigners = []*torchwood.CosignatureSigner{newTestSigner(t, c.IssuanceOrigin)}
 		}},
-		{"EvidenceKey", func(c *lockstep.Config) {
+		{"EvidenceKey", func(c *testConfig) {
 			c.EvidenceSigners = []*torchwood.CosignatureSigner{newTestSigner(t, c.EvidenceOrigin)}
 		}},
-		{"SwappedKeys", func(c *lockstep.Config) {
+		{"SwappedKeys", func(c *testConfig) {
 			c.IssuanceSigners, c.EvidenceSigners = c.EvidenceSigners, c.IssuanceSigners
 		}},
-		{"SwappedLogs", func(c *lockstep.Config) {
+		{"SwappedLogs", func(c *testConfig) {
 			c.IssuanceOrigin, c.EvidenceOrigin = c.EvidenceOrigin, c.IssuanceOrigin
 			c.IssuanceSigners, c.EvidenceSigners = c.EvidenceSigners, c.IssuanceSigners
 		}},
-		{"ExtraIssuanceKey", func(c *lockstep.Config) {
+		{"ExtraIssuanceKey", func(c *testConfig) {
 			c.IssuanceSigners = append(slices.Clone(c.IssuanceSigners), newTestSigner(t, c.IssuanceOrigin))
 		}},
-		{"ExtraEvidenceKey", func(c *lockstep.Config) {
+		{"ExtraEvidenceKey", func(c *testConfig) {
 			c.EvidenceSigners = append(slices.Clone(c.EvidenceSigners), newTestSigner(t, c.EvidenceOrigin))
 		}},
 	}
@@ -571,7 +569,7 @@ func TestReloadWrongConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := tl.Config
 			tt.mutate(&c)
-			if _, err := lockstep.LoadLogs(context.Background(), c); err == nil {
+			if _, err := lockstep.LoadLogs(context.Background(), c.build()); err == nil {
 				t.Error("expected loading to fail")
 			} else {
 				t.Logf("LoadLogs: %v", err)
@@ -613,7 +611,7 @@ func TestLoadInconsistentState(t *testing.T) {
 				ic, _ := tl.lockCheckpoints()
 				setLock(t, tl, signCheckpoint(t, ic.Origin, tl.Config.IssuanceSigners, ic.Tree))
 			},
-			wantError: "missing evidence checkpoint",
+			wantError: "missing second checkpoint",
 		},
 		{
 			name: "LockSwapped",
@@ -683,7 +681,7 @@ func TestLoadInconsistentState(t *testing.T) {
 			tl.CheckLog(3)
 
 			tt.corrupt(t, tl)
-			_, err := lockstep.LoadLogs(ctx, tl.Config)
+			_, err := lockstep.LoadLogs(ctx, tl.Config.build())
 			if err == nil {
 				t.Fatal("expected loading to fail")
 			}
@@ -697,16 +695,13 @@ func TestLoadInconsistentState(t *testing.T) {
 
 func setLock(t *testing.T, tl *TestLogs, b []byte) {
 	t.Helper()
-	old, err := tl.Config.Lock.Fetch(context.Background(), tl.Config.IssuanceOrigin)
-	fatalIfErr(t, err)
-	_, err = tl.Config.Lock.Replace(context.Background(), old, b)
-	fatalIfErr(t, err)
+	setLockRow(t, tl.Config.DBPath, b)
 }
 
 func TestCreateLogs(t *testing.T) {
 	ctx := context.Background()
 	tl := NewEmptyTestLogs(t)
-	if err := lockstep.CreateLogs(ctx, tl.Config); !errors.Is(err, lockstep.ErrLogExists) {
+	if err := lockstep.CreateLogs(ctx, tl.Config.build()); !errors.Is(err, lockstep.ErrLogExists) {
 		t.Errorf("got error %v, expected ErrLogExists", err)
 	}
 
@@ -718,7 +713,7 @@ func TestCreateLogs(t *testing.T) {
 			fatalIfErr(t, err)
 			fatalIfErr(t, c.Backend.Upload(ctx, side.prefix+"checkpoint",
 				signCheckpoint(t, side.origin, side.signers, tlog.Tree{N: 0, Hash: tree}), nil))
-			if err := lockstep.CreateLogs(ctx, c); err == nil {
+			if err := lockstep.CreateLogs(ctx, c.build()); err == nil {
 				t.Error("expected creation to fail")
 			} else {
 				t.Logf("CreateLogs: %v", err)
@@ -729,19 +724,19 @@ func TestCreateLogs(t *testing.T) {
 	t.Run("Validate", func(t *testing.T) {
 		for _, tt := range []struct {
 			name   string
-			mutate func(c *lockstep.Config)
+			mutate func(c *testConfig)
 		}{
-			{"SameOrigin", func(c *lockstep.Config) { c.EvidenceOrigin = c.IssuanceOrigin }},
-			{"EmptyOrigin", func(c *lockstep.Config) { c.IssuanceOrigin = "" }},
-			{"NoIssuanceSigners", func(c *lockstep.Config) { c.IssuanceSigners = nil }},
-			{"NoEvidenceSigners", func(c *lockstep.Config) { c.EvidenceSigners = nil }},
+			{"SameOrigin", func(c *testConfig) { c.EvidenceOrigin = c.IssuanceOrigin }},
+			{"EmptyOrigin", func(c *testConfig) { c.IssuanceOrigin = "" }},
+			{"NoIssuanceSigners", func(c *testConfig) { c.IssuanceSigners = nil }},
+			{"NoEvidenceSigners", func(c *testConfig) { c.EvidenceSigners = nil }},
 		} {
 			c := newTestConfig(t)
 			tt.mutate(&c)
-			if err := lockstep.CreateLogs(ctx, c); err == nil {
+			if err := lockstep.CreateLogs(ctx, c.build()); err == nil {
 				t.Errorf("%s: expected creation to fail", tt.name)
 			}
-			if _, err := lockstep.LoadLogs(ctx, c); err == nil {
+			if _, err := lockstep.LoadLogs(ctx, c.build()); err == nil {
 				t.Errorf("%s: expected loading to fail", tt.name)
 			}
 		}
@@ -758,11 +753,11 @@ func TestStagingCollision(t *testing.T) {
 	addEntryExpectFailureWithSeed(t, tl, 'A')
 	addEntryExpectFailureWithSeed(t, tl, 'B')
 
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLock(false)
+	tl.Config.Faults.UpdateCallback = failUpdate(false)
 	sequenceExpectFailure(t, tl)
 	tl.CheckLog(1)
 
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
+	tl.Config.Faults.UpdateCallback = nil
 	tl = ReloadLogs(t, tl)
 	tl.CheckLog(1)
 
@@ -835,10 +830,10 @@ func TestStagingCollisionDifferentSplit(t *testing.T) {
 	for i := uint64(1); i <= 300; i++ {
 		addEntryExpectFailureWithSeed(t, tl, i)
 	}
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLock(false)
+	tl.Config.Faults.UpdateCallback = failUpdate(false)
 	sequenceExpectFailure(t, tl)
 	tl.CheckLog(2)
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
+	tl.Config.Faults.UpdateCallback = nil
 	tl = ReloadLogs(t, tl)
 	tl.CheckLog(2)
 
@@ -876,7 +871,7 @@ func TestFatalError(t *testing.T) {
 	addEntry(t, tl)
 	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLock(false)
+	tl.Config.Faults.UpdateCallback = failUpdate(false)
 	addEntryExpectFailure(t, tl)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
@@ -892,7 +887,7 @@ func TestFatalError(t *testing.T) {
 		t.Errorf("got error %v, expected sequencer stopped", err)
 	}
 
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
+	tl.Config.Faults.UpdateCallback = nil
 
 	tl = ReloadLogs(t, tl)
 	addEntry(t, tl)
@@ -902,6 +897,55 @@ func TestFatalError(t *testing.T) {
 
 // TestNonFatalError verifies that a non-fatal sequencing error is reported to
 // the entries in the failed pool, but doesn't stop the sequencer.
+// TestBadSignerOutput verifies that checkpoints returned by the signer are
+// checked before they are published.
+func TestBadSignerOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		result func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte)
+	}{
+		{"Swapped", func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte) {
+			return ec, ic
+		}},
+		{"OldIssuance", func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte) {
+			b, err := tl.Config.Backend.Fetch(t.Context(), "issuance/checkpoint")
+			fatalIfErr(t, err)
+			return b, ec
+		}},
+		{"WrongEvidenceKey", func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte) {
+			c := openCheckpoint(t, tl.Config.EvidenceOrigin, tl.Config.EvidenceSigners, ec)
+			return ic, signCheckpoint(t, c.Origin,
+				[]*torchwood.CosignatureSigner{newTestSigner(t, c.Origin)}, c.Tree)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tl := NewEmptyTestLogs(t)
+			addEntry(t, tl)
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			tl.CheckLog(1)
+
+			tl.Config.Faults.UpdateResult = func(ic, ec []byte) ([]byte, []byte) {
+				return tt.result(t, tl, ic, ec)
+			}
+			addEntryExpectFailure(t, tl)
+			sequenceExpectFailure(t, tl)
+			published := tl.CheckLog(2)
+			if published != [2]int64{1, 1} {
+				t.Errorf("published sizes %v, expected 1", published)
+			}
+
+			// The signer did apply the update, so reloading recovers it.
+			tl.Config.Faults.UpdateResult = nil
+			tl = ReloadLogs(t, tl)
+			tl.CheckLog(2)
+			addEntry(t, tl)
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			tl.CheckLog(3)
+		})
+	}
+}
+
 func TestNonFatalError(t *testing.T) {
 	tl := NewEmptyTestLogs(t)
 	tl.StartSequencer()
@@ -960,11 +1004,11 @@ func TestSequenceErrors(t *testing.T) {
 	}
 	breakLock := func(persist bool) func(*TestLogs) {
 		return func(tl *TestLogs) {
-			tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLock(persist)
+			tl.Config.Faults.UpdateCallback = failUpdate(persist)
 		}
 	}
 	unbreakLock := func(tl *TestLogs) {
-		tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
+		tl.Config.Faults.UpdateCallback = nil
 	}
 	breakUpload := func(prefix string, persist bool) func(*TestLogs) {
 		return func(tl *TestLogs) {
@@ -1204,9 +1248,9 @@ func TestReloadLaggingCheckpoint(t *testing.T) {
 	}
 }
 
-// TestLocalBackends runs the logs on the real LocalBackend and SQLiteBackend
-// in a temporary directory, across a restart.
-func TestLocalBackends(t *testing.T) {
+// TestLocalBackend runs the logs on the real LocalBackend in a temporary
+// directory, across a restart.
+func TestLocalBackend(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	logger := slog.New(testLogHandler(t))
@@ -1214,26 +1258,15 @@ func TestLocalBackends(t *testing.T) {
 	backend, err := lockstep.NewLocalBackend(ctx, filepath.Join(dir, "data"), logger)
 	fatalIfErr(t, err)
 
-	dbPath := filepath.Join(dir, "lock.db")
-	conn, err := sqlite.OpenConn(dbPath, sqlite.OpenReadWrite|sqlite.OpenCreate)
-	fatalIfErr(t, err)
-	fatalIfErr(t, sqlitex.ExecuteTransient(conn,
-		"CREATE TABLE locks (origin TEXT PRIMARY KEY, body BLOB NOT NULL) STRICT", nil))
-	fatalIfErr(t, conn.Close())
-	lock, err := lockstep.NewSQLiteBackend(ctx, dbPath, logger)
-	fatalIfErr(t, err)
-
-	if _, err := lock.Fetch(ctx, issuanceOrigin); !errors.Is(err, lockstep.ErrLogNotFound) {
-		t.Errorf("got error %v, expected ErrLogNotFound", err)
-	}
-
 	config := newTestConfig(t)
 	config.Backend = backend
-	config.Lock = lock
+	if _, _, err := config.build().Signer.Checkpoints(ctx); !errors.Is(err, lockstep.ErrLogNotFound) {
+		t.Errorf("got error %v, expected ErrLogNotFound", err)
+	}
 	tl := NewEmptyTestLogsWithConfig(t, config)
 	tl.Quiet()
 
-	if err := lockstep.CreateLogs(ctx, tl.Config); !errors.Is(err, lockstep.ErrLogExists) {
+	if err := lockstep.CreateLogs(ctx, tl.Config.build()); !errors.Is(err, lockstep.ErrLogExists) {
 		t.Errorf("got error %v, expected ErrLogExists", err)
 	}
 
@@ -1248,10 +1281,6 @@ func TestLocalBackends(t *testing.T) {
 	fatalIfErr(t, tl.Logs.Sequence(ctx))
 	tl.CheckLog(tileWidth + 2)
 
-	// Restart with a fresh database connection.
-	lock, err = lockstep.NewSQLiteBackend(ctx, dbPath, logger)
-	fatalIfErr(t, err)
-	tl.Config.Lock = lock
 	tl = ReloadLogs(t, tl)
 	tl.CheckLog(tileWidth + 2)
 	addEntry(t, tl)
@@ -1274,25 +1303,6 @@ func TestLocalBackends(t *testing.T) {
 		}
 		if _, err := backend.Fetch(ctx, "issuance/tile/0/999"); err == nil {
 			t.Error("expected fetching a missing file to fail")
-		}
-	})
-
-	t.Run("StaleReplace", func(t *testing.T) {
-		old, err := lock.Fetch(ctx, issuanceOrigin)
-		fatalIfErr(t, err)
-		if _, err := lock.Replace(ctx, old, []byte("new")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := lock.Replace(ctx, old, []byte("newer")); err == nil {
-			t.Error("expected replacing a stale checkpoint to fail")
-		}
-		if cur, err := lock.Fetch(ctx, issuanceOrigin); err != nil {
-			t.Fatal(err)
-		} else if !bytes.Equal(cur.Bytes(), []byte("new")) {
-			t.Errorf("got %q, expected %q", cur.Bytes(), "new")
-		}
-		if err := lock.Create(ctx, issuanceOrigin, []byte("x")); err == nil {
-			t.Error("expected creating an existing log to fail")
 		}
 	})
 }
