@@ -646,9 +646,9 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 		return acmeerrors.Internal("couldn't marshal staged uploads: %w", err)
 	}
 	stagingPath := stagingPath(newStates[0].tree, newStates[1].tree)
-	// Don't upload an empty staging bundle, as it would have the same path of
-	// the previous one, but different (empty) content. Note that [LoadLogs] might
-	// end up re-uploading the tiles from the previous one, which is harmless.
+	// Don't upload an empty staging bundle, as it would overwrite the previous
+	// one, which has the same path. Note that [LoadLogs] might end up
+	// re-uploading the tiles from the previous one, which is harmless.
 	if len(tileUploads) > 0 {
 		gzipData, err := compress(stagedUploads)
 		if err != nil {
@@ -797,6 +797,15 @@ func applyStagedUploads(ctx context.Context, backend Backend, stagedUploads []by
 	return g.Wait()
 }
 
+// stagingPath returns the path of the staging bundle for the tiles produced by
+// a sequencing that reaches tree1 and tree2.
+//
+// The path only depends on the new trees, because that's all [LoadLogs] knows
+// when restoring, but the bundle contents also depend on the size the trees
+// were extended from. This means the bundle is not immutable. However, any
+// bundle at a path is good enough to recover from: the tree size only grows,
+// and since they land at the same final tree hashes, every later bundle is a
+// subset of the previous bundles.
 func stagingPath(tree1, tree2 tlog.Tree) string {
 	// We don't segment the path like in [torchwood.TilePath], because old
 	// staging bundles are deleted from the local backend (where it would be

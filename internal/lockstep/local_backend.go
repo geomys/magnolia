@@ -57,7 +57,7 @@ type UploadOptions struct {
 
 var optsHashTile = &UploadOptions{Immutable: true}
 var optsDataTile = &UploadOptions{Compressed: true, Immutable: true}
-var optsStaging = &UploadOptions{Compressed: true, Immutable: true}
+var optsStaging = &UploadOptions{Compressed: true} // not immutable, see [stagingPath]
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
 type LocalBackend struct {
