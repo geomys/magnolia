@@ -306,6 +306,24 @@ func TestLeafValidation(t *testing.T) {
 	tl.CheckLog(2)
 }
 
+// TestMaxSizeDataTile verifies that a full data tile of maximum size leaves,
+// which compresses extremely well, can be loaded.
+func TestMaxSizeDataTile(t *testing.T) {
+	tl := NewEmptyTestLogs(t)
+	tl.Quiet()
+	for i := range tileWidth {
+		leaf := bytes.Repeat([]byte{byte(i)}, 65535)
+		e := &lockstep.PendingLogEntry{IssuanceLeaf: leaf, EvidenceLeaf: leaf}
+		waitFuncWrapper(t, tl, e, true, tl.Logs.AddLeaf(t.Context(), e))
+	}
+	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	tl.CheckLog(tileWidth)
+	tl = ReloadLogs(t, tl)
+	addEntry(t, tl)
+	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	tl.CheckLog(tileWidth + 1)
+}
+
 // TestConcurrentSubmissions verifies that entries submitted concurrently while
 // the sequencer is running are all assigned distinct, contiguous indexes, and
 // that each is published at that index in both logs.
@@ -895,8 +913,6 @@ func TestFatalError(t *testing.T) {
 	tl.CheckLog(3)
 }
 
-// TestNonFatalError verifies that a non-fatal sequencing error is reported to
-// the entries in the failed pool, but doesn't stop the sequencer.
 // TestBadSignerOutput verifies that checkpoints returned by the signer are
 // checked before they are published.
 func TestBadSignerOutput(t *testing.T) {
@@ -946,6 +962,8 @@ func TestBadSignerOutput(t *testing.T) {
 	}
 }
 
+// TestNonFatalError verifies that a non-fatal sequencing error is reported to
+// the entries in the failed pool, but doesn't stop the sequencer.
 func TestNonFatalError(t *testing.T) {
 	tl := NewEmptyTestLogs(t)
 	tl.StartSequencer()
@@ -1310,8 +1328,7 @@ func TestLocalBackend(t *testing.T) {
 func BenchmarkSequencer(b *testing.B) {
 	tl := NewEmptyTestLogs(b)
 	tl.Quiet()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		const poolSize = 3000
 		if i%poolSize == 0 && i != 0 {
 			fatalIfErr(b, tl.Logs.Sequence(context.Background()))

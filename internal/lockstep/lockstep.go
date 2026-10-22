@@ -360,6 +360,8 @@ type SequencedEntry struct {
 	Leaf  *PendingLogEntry
 }
 
+const maxLeafSize = 65535
+
 // AddLeaf adds leaf to the current pool. It returns a function that will
 // wait until the pool is sequenced and return the sequenced leaf.
 func (ls *Logs) AddLeaf(ctx context.Context, leaf *PendingLogEntry) WaitEntryFunc {
@@ -369,7 +371,7 @@ func (ls *Logs) AddLeaf(ctx context.Context, leaf *PendingLogEntry) WaitEntryFun
 		}
 	}
 
-	if len(leaf.IssuanceLeaf) > 65535 || len(leaf.EvidenceLeaf) > 65535 {
+	if len(leaf.IssuanceLeaf) > maxLeafSize || len(leaf.EvidenceLeaf) > maxLeafSize {
 		return errFunc("leaf too large: issuance %d, evidence %d", len(leaf.IssuanceLeaf), len(leaf.EvidenceLeaf))
 	}
 	if len(leaf.IssuanceLeaf) == 0 || len(leaf.EvidenceLeaf) == 0 {
@@ -814,6 +816,7 @@ func compress(data []byte) ([]byte, error) {
 }
 
 const maxCompressRatio = 100
+const maxDataTileSize = torchwood.TileWidth * (2 + maxLeafSize)
 
 func fetchAndDecompress(ctx context.Context, backend Backend, key string) ([]byte, error) {
 	data, err := backend.Fetch(ctx, key)
@@ -824,12 +827,12 @@ func fetchAndDecompress(ctx context.Context, backend Backend, key string) ([]byt
 	if err != nil {
 		return nil, err
 	}
-	maxSize := int64(len(data)) * maxCompressRatio
-	b, err := io.ReadAll(io.LimitReader(r, maxSize))
+	maxSize := max(int64(len(data))*maxCompressRatio, maxDataTileSize)
+	b, err := io.ReadAll(io.LimitReader(r, maxSize+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(b) == int(maxSize) {
+	if int64(len(b)) > maxSize {
 		return nil, acmeerrors.Internal("decompressed data hit maximum size of %d bytes", maxSize)
 	}
 	return b, nil
