@@ -58,9 +58,10 @@ func (c *Config) validate() error {
 type Logs struct {
 	c Config
 
-	// issuanceLog and evidenceLog are owned by sequencePool.
-	issuanceLog tlogState
-	evidenceLog tlogState
+	// issuanceLog, evidenceLog, and lockCheckpoint are owned by sequencePool.
+	issuanceLog    tlogState
+	evidenceLog    tlogState
+	lockCheckpoint LockedCheckpoint
 
 	// poolGate is acquired by AddLeaf before poolMu, while the sequencer
 	// takes poolMu directly, so that sequencing doesn't have to queue behind
@@ -75,8 +76,7 @@ type Logs struct {
 }
 
 type tlogState struct {
-	tree           tlog.Tree
-	lockCheckpoint LockedCheckpoint
+	tree tlog.Tree
 	// edgeTiles is a map from level to the right-most tile of that level.
 	edgeTiles map[int]tileWithBytes
 }
@@ -113,14 +113,7 @@ func CreateLogs(ctx context.Context, config Config) error {
 		return ErrLogExists
 	}
 	if !errors.Is(err, ErrLogNotFound) {
-		return fmt.Errorf("couldn't fetch issuance checkpoint from lock database: %w", err)
-	}
-	_, err = config.Lock.Fetch(ctx, config.EvidenceOrigin)
-	if err == nil {
-		return ErrLogExists
-	}
-	if !errors.Is(err, ErrLogNotFound) {
-		return fmt.Errorf("couldn't fetch evidence checkpoint from lock database: %w", err)
+		return fmt.Errorf("couldn't fetch checkpoints from lock database: %w", err)
 	}
 	if _, err := config.Backend.Fetch(ctx, "issuance/checkpoint"); err == nil {
 		return fmt.Errorf("issuance checkpoint missing from database but present in object storage")
@@ -142,14 +135,11 @@ func CreateLogs(ctx context.Context, config Config) error {
 		return fmt.Errorf("couldn't sign empty evidence tree head: %w", err)
 	}
 
-	if err := config.Lock.Create(ctx, config.IssuanceOrigin, ic); err != nil {
-		return fmt.Errorf("couldn't create issuance checkpoint in lock database: %w", err)
+	if err := config.Lock.Create(ctx, config.IssuanceOrigin, joinLockCheckpoints(ic, ec)); err != nil {
+		return fmt.Errorf("couldn't create checkpoints in lock database: %w", err)
 	}
 	if err := config.Backend.Upload(ctx, "issuance/checkpoint", ic, optsCheckpoint); err != nil {
 		return fmt.Errorf("couldn't upload issuance checkpoint: %w", err)
-	}
-	if err := config.Lock.Create(ctx, config.EvidenceOrigin, ec); err != nil {
-		return fmt.Errorf("couldn't create evidence checkpoint in lock database: %w", err)
 	}
 	if err := config.Backend.Upload(ctx, "evidence/checkpoint", ec, optsCheckpoint); err != nil {
 		return fmt.Errorf("couldn't upload evidence checkpoint: %w", err)
@@ -167,21 +157,20 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 
 	// Load the checkpoints from the lock database. If we crashed during
 	// serialization, the ones in the lock database are going to be the latest.
-	issuanceLock, err := config.Lock.Fetch(ctx, config.IssuanceOrigin)
+	lock, err := config.Lock.Fetch(ctx, config.IssuanceOrigin)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch issuance checkpoint from lock database: %w", err)
+		return nil, fmt.Errorf("couldn't fetch checkpoints from lock database: %w", err)
 	}
-	config.Logger.DebugContext(ctx, "loaded issuance checkpoint", "checkpoint", issuanceLock.Bytes())
-	ic, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceSigners, issuanceLock.Bytes())
+	config.Logger.DebugContext(ctx, "loaded checkpoints", "checkpoints", lock.Bytes())
+	issuanceLock, evidenceLock, err := splitLockCheckpoints(lock.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("couldn't split checkpoints from lock database: %w", err)
+	}
+	ic, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceSigners, issuanceLock)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't open issuance checkpoint from lock database: %w", err)
 	}
-	evidenceLock, err := config.Lock.Fetch(ctx, config.EvidenceOrigin)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch evidence checkpoint from lock database: %w", err)
-	}
-	config.Logger.DebugContext(ctx, "loaded evidence checkpoint", "checkpoint", evidenceLock.Bytes())
-	ec, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceSigners, evidenceLock.Bytes())
+	ec, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceSigners, evidenceLock)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't open evidence checkpoint from lock database: %w", err)
 	}
@@ -209,7 +198,6 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 
 	switch {
 	case ic.N != ec.N:
-		// TODO: this is currently possible, but won't be once they are updated atomically.
 		return nil, fmt.Errorf("issuance and evidence checkpoints have different sizes: %d != %d", ic.N, ec.N)
 	case ic1.N == ic.N && ic1.Hash != ic.Hash:
 		return nil, fmt.Errorf("issuance checkpoint hash mismatch: %x != %x", ic1.Hash, ic.Hash)
@@ -301,18 +289,35 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 	return &Logs{
 		c: config,
 		issuanceLog: tlogState{
-			tree:           ic.Tree,
-			lockCheckpoint: issuanceLock,
-			edgeTiles:      edgeTiles[0],
+			tree:      ic.Tree,
+			edgeTiles: edgeTiles[0],
 		},
 		evidenceLog: tlogState{
-			tree:           ec.Tree,
-			lockCheckpoint: evidenceLock,
-			edgeTiles:      edgeTiles[1],
+			tree:      ec.Tree,
+			edgeTiles: edgeTiles[1],
 		},
-		poolGate:    make(chan struct{}, 1),
-		currentPool: newPool(),
+		lockCheckpoint: lock,
+		poolGate:       make(chan struct{}, 1),
+		currentPool:    newPool(),
 	}, nil
+}
+
+// joinLockCheckpoints encodes the issuance and evidence checkpoints as a single
+// lock database entry, so that they are always updated atomically.
+func joinLockCheckpoints(ic, ec []byte) []byte {
+	return slices.Concat(ic, []byte("\n"), ec)
+}
+
+func splitLockCheckpoints(b []byte) (ic, ec []byte, err error) {
+	body, rest, ok := bytes.Cut(b, []byte("\n\n"))
+	if !ok {
+		return nil, nil, errors.New("missing issuance checkpoint signatures")
+	}
+	sigs, ec, ok := bytes.Cut(rest, []byte("\n\n"))
+	if !ok {
+		return nil, nil, errors.New("missing evidence checkpoint")
+	}
+	return b[:len(body)+len("\n\n")+len(sigs)+len("\n")], ec, nil
 }
 
 func openCheckpoint(origin string, signers []*torchwood.CosignatureSigner, b []byte) (torchwood.Checkpoint, error) {
@@ -666,21 +671,13 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	if err != nil {
 		return acmeerrors.Internal("couldn't sign checkpoint: %w", err)
 	}
-	// TODO: make these two Replace operations atomic.
-	issuanceLock, e := ls.c.Lock.Replace(ctx, ls.issuanceLog.lockCheckpoint, issuanceCheckpoint)
+	lock, e := ls.c.Lock.Replace(ctx, ls.lockCheckpoint, joinLockCheckpoints(issuanceCheckpoint, evidenceCheckpoint))
 	if e != nil {
 		// This is a critical error, since we don't know the state of the
-		// checkpoint in the database at this point. Bail and let [LoadLogs] get us
-		// to a good state after restart.
-		return acmeerrors.Internal("%w: couldn't upload issuance checkpoint to database: %w", errFatal, e)
+		// checkpoints in the database at this point. Bail and let [LoadLogs] get
+		// us to a good state after restart.
+		return acmeerrors.Internal("%w: couldn't upload checkpoints to database: %w", errFatal, e)
 	}
-	newStates[0].lockCheckpoint = issuanceLock
-	evidenceLock, e := ls.c.Lock.Replace(ctx, ls.evidenceLog.lockCheckpoint, evidenceCheckpoint)
-	if e != nil {
-		// Same as above.
-		return acmeerrors.Internal("%w: couldn't upload evidence checkpoint to database: %w", errFatal, e)
-	}
-	newStates[1].lockCheckpoint = evidenceLock
 
 	// At this point the pool is fully serialized: new entries were persisted to
 	// object storage (in staging) and the checkpoint was committed to the
@@ -689,6 +686,7 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	p.firstLeafIndex = oldTree.N
 	ls.issuanceLog = newStates[0]
 	ls.evidenceLog = newStates[1]
+	ls.lockCheckpoint = lock
 
 	// Use applyStagedUploads instead of going over tileUploads directly, to
 	// exercise the same code path as [LoadLogs].
