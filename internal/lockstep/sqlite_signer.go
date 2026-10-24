@@ -27,9 +27,10 @@ import (
 var ErrLogNotFound = errors.New("log not found")
 
 // A CheckpointSigner signs the checkpoints of a pair of logs, and keeps track
-// of the latest ones, refusing to sign trees that don't extend them. It is
-// modeled after a c2sp.org/tlog-witness, so that it can be backed by a signer
-// that maintains its own state, such as an HSM.
+// of the latest ones, refusing to sign trees that don't extend them. It also
+// signs subtrees for entries added to the first log. It is modeled after a
+// c2sp.org/tlog-witness, including the sign-subtree call, so that it can be
+// backed by a signer that maintains its own state, such as an HSM.
 //
 // The two logs are always updated together, and always have the same size.
 //
@@ -49,20 +50,43 @@ type CheckpointSigner interface {
 	// trees are consistent with them. It returns the new checkpoints, which
 	// replace the latest ones.
 	//
+	// It also checks that u.FirstSubtrees are the subtrees covering the new
+	// entries of the first log, [u.OldSize, u.First.N), in order, as described
+	// in draft-ietf-plants-merkle-tree-certs, Section 4.5, and that they are
+	// included in u.First. It returns their subtree cosignatures, in the same
+	// order.
+	//
 	// If Update returns an error, the latest checkpoints might or might not
 	// have been replaced. One will never be updated without the other.
-	Update(ctx context.Context, u CheckpointUpdate) (first, second []byte, err error)
+	Update(ctx context.Context, u CheckpointUpdate) (first, second []byte, firstSubtrees [][]SubtreeSignature, err error)
 }
 
 // A CheckpointUpdate is the input to [CheckpointSigner.Update].
 type CheckpointUpdate struct {
 	OldSize int64
 
-	First      tlog.Tree
-	FirstProof tlog.TreeProof
+	First         tlog.Tree
+	FirstProof    tlog.TreeProof
+	FirstSubtrees []Subtree
 
 	Second      tlog.Tree
 	SecondProof tlog.TreeProof
+}
+
+// A Subtree is a subtree [Start, End) of a log, as defined in
+// draft-ietf-plants-merkle-tree-certs, Section 4.1, with its hash and a subtree
+// consistency proof to the tree it is included in.
+type Subtree struct {
+	Start, End int64
+	Hash       tlog.Hash
+	Proof      torchwood.SubtreeProof
+}
+
+// A SubtreeSignature is a c2sp.org/tlog-cosignature subtree cosignature.
+type SubtreeSignature struct {
+	Cosigner  string
+	KeyHash   uint32
+	Signature []byte
 }
 
 // SQLiteSigner is a [CheckpointSigner] that signs with in-memory keys, and
@@ -188,59 +212,92 @@ func (s *SQLiteSigner) fetch() (first, second []byte, err error) {
 	return c1, c2, nil
 }
 
-func (s *SQLiteSigner) Update(ctx context.Context, u CheckpointUpdate) (first, second []byte, err error) {
+func (s *SQLiteSigner) Update(ctx context.Context, u CheckpointUpdate) (first, second []byte, firstSubtrees [][]SubtreeSignature, err error) {
 	defer prometheus.NewTimer(s.duration).ObserveDuration()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	endFn, err := sqlitex.ImmediateTransaction(s.conn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't begin SQLite transaction: %w", err)
+		return nil, nil, nil, fmt.Errorf("couldn't begin SQLite transaction: %w", err)
 	}
 	defer endFn(&err)
 
 	old1, old2, err := s.fetch()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	oc1, err := openCheckpoint(s.firstOrigin, verifiers(s.firstSigners), old1)
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't open checkpoint for %q from SQLite: %w", s.firstOrigin, err)
+		return nil, nil, nil, fmt.Errorf("couldn't open checkpoint for %q from SQLite: %w", s.firstOrigin, err)
 	}
 	oc2, err := openCheckpoint(s.secondOrigin, verifiers(s.secondSigners), old2)
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't open checkpoint for %q from SQLite: %w", s.secondOrigin, err)
+		return nil, nil, nil, fmt.Errorf("couldn't open checkpoint for %q from SQLite: %w", s.secondOrigin, err)
 	}
 	if oc1.N != u.OldSize || oc2.N != u.OldSize {
-		return nil, nil, fmt.Errorf("latest checkpoints have sizes %d and %d, not %d", oc1.N, oc2.N, u.OldSize)
+		return nil, nil, nil, fmt.Errorf("latest checkpoints have sizes %d and %d, not %d", oc1.N, oc2.N, u.OldSize)
 	}
 	if u.First.N != u.Second.N {
-		return nil, nil, fmt.Errorf("new tree sizes do not match: %d != %d", u.First.N, u.Second.N)
+		return nil, nil, nil, fmt.Errorf("new tree sizes do not match: %d != %d", u.First.N, u.Second.N)
 	}
 	if err := checkTree(u.FirstProof, u.First, oc1.Tree); err != nil {
-		return nil, nil, fmt.Errorf("new tree for %q is not consistent with latest checkpoint: %w", s.firstOrigin, err)
+		return nil, nil, nil, fmt.Errorf("new tree for %q is not consistent with latest checkpoint: %w", s.firstOrigin, err)
 	}
 	if err := checkTree(u.SecondProof, u.Second, oc2.Tree); err != nil {
-		return nil, nil, fmt.Errorf("new tree for %q is not consistent with latest checkpoint: %w", s.secondOrigin, err)
+		return nil, nil, nil, fmt.Errorf("new tree for %q is not consistent with latest checkpoint: %w", s.secondOrigin, err)
+	}
+	var ranges [][2]int64
+	switch start, end := u.OldSize, u.First.N; end {
+	case start:
+	case start + 1:
+		ranges = [][2]int64{{start, end}}
+	default:
+		// Two or more entries are always covered by two non-empty subtrees.
+		leftStart, mid, err := torchwood.CoverInterval(start, end)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("couldn't compute covering subtrees: %w", err)
+		}
+		ranges = [][2]int64{{leftStart, mid}, {mid, end}}
+	}
+	if len(u.FirstSubtrees) != len(ranges) {
+		return nil, nil, nil, fmt.Errorf("got %d subtrees, expected the %d covering [%d, %d)",
+			len(u.FirstSubtrees), len(ranges), u.OldSize, u.First.N)
+	}
+	for i, st := range u.FirstSubtrees {
+		if st.Start != ranges[i][0] || st.End != ranges[i][1] {
+			return nil, nil, nil, fmt.Errorf("subtree [%d, %d) is not the covering subtree [%d, %d)",
+				st.Start, st.End, ranges[i][0], ranges[i][1])
+		}
+		if err := torchwood.CheckSubtree(st.Proof, u.First.N, u.First.Hash, st.Start, st.End, st.Hash); err != nil {
+			return nil, nil, nil, fmt.Errorf("subtree [%d, %d) is not included in new tree for %q: %w", st.Start, st.End, s.firstOrigin, err)
+		}
 	}
 
 	c1, err := signCheckpoint(s.firstOrigin, signers(s.firstSigners), u.First)
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't sign checkpoint for %q: %w", s.firstOrigin, err)
+		return nil, nil, nil, fmt.Errorf("couldn't sign checkpoint for %q: %w", s.firstOrigin, err)
 	}
 	c2, err := signCheckpoint(s.secondOrigin, signers(s.secondSigners), u.Second)
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't sign checkpoint for %q: %w", s.secondOrigin, err)
+		return nil, nil, nil, fmt.Errorf("couldn't sign checkpoint for %q: %w", s.secondOrigin, err)
+	}
+	for _, st := range u.FirstSubtrees {
+		sigs, err := signSubtree(s.firstOrigin, s.firstSigners, st)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("couldn't sign subtree [%d, %d) for %q: %w", st.Start, st.End, s.firstOrigin, err)
+		}
+		firstSubtrees = append(firstSubtrees, sigs)
 	}
 	err = sqlitex.Execute(s.conn, "UPDATE locks SET body = ? WHERE origin = ?", &sqlitex.ExecOptions{
 		Args: []any{joinLockCheckpoints(c1, c2), s.firstOrigin},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't update checkpoints in SQLite: %w", err)
+		return nil, nil, nil, fmt.Errorf("couldn't update checkpoints in SQLite: %w", err)
 	}
 	if s.conn.Changes() != 1 {
-		return nil, nil, fmt.Errorf("unexpected number of SQLite rows updated: %d", s.conn.Changes())
+		return nil, nil, nil, fmt.Errorf("unexpected number of SQLite rows updated: %d", s.conn.Changes())
 	}
-	return c1, c2, nil
+	return c1, c2, firstSubtrees, nil
 }
 
 func (s *SQLiteSigner) Metrics() []prometheus.Collector {
@@ -288,8 +345,8 @@ func signers(s []*torchwood.CosignatureSigner) []note.Signer {
 	return signers
 }
 
-func verifiers(s []*torchwood.CosignatureSigner) []note.Verifier {
-	verifiers := make([]note.Verifier, len(s))
+func verifiers(s []*torchwood.CosignatureSigner) []*torchwood.CosignatureVerifier {
+	verifiers := make([]*torchwood.CosignatureVerifier, len(s))
 	for i, cs := range s {
 		verifiers[i] = cs.Verifier()
 	}
@@ -312,6 +369,19 @@ func signCheckpoint(origin string, signers []note.Signer, tree tlog.Tree) ([]byt
 		return nil, acmeerrors.Internal("couldn't sign note: %w", err)
 	}
 	return signedNote, nil
+}
+
+// signSubtree produces a subtree cosignature with each signer.
+func signSubtree(origin string, signers []*torchwood.CosignatureSigner, st Subtree) ([]SubtreeSignature, error) {
+	var sigs []SubtreeSignature
+	for _, s := range signers {
+		sig, err := s.SignSubtreeRaw(origin, st.Start, st.End, st.Hash)
+		if err != nil {
+			return nil, err
+		}
+		sigs = append(sigs, SubtreeSignature{Cosigner: s.Name(), KeyHash: s.KeyHash(), Signature: sig})
+	}
+	return sigs, nil
 }
 
 // greaseSignatures produces unverifiable but otherwise correct signatures.

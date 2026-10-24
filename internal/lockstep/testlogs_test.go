@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/mldsa"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -150,9 +149,10 @@ type signerFaults struct {
 	// Update in any case.
 	UpdateCallback func() (apply bool, err error)
 
-	// UpdateResult, if set, replaces the checkpoints returned by successful
-	// updates, which are still applied.
-	UpdateResult func(issuance, evidence []byte) ([]byte, []byte)
+	// UpdateResult, if set, replaces the checkpoints and subtree signatures
+	// returned by successful updates, which are still applied.
+	UpdateResult func(u lockstep.CheckpointUpdate, issuance, evidence []byte,
+		subtrees [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature)
 }
 
 type faultySigner struct {
@@ -160,26 +160,26 @@ type faultySigner struct {
 	faults *signerFaults
 }
 
-func (s *faultySigner) Update(ctx context.Context, u lockstep.CheckpointUpdate) (issuance, evidence []byte, err error) {
+func (s *faultySigner) Update(ctx context.Context, u lockstep.CheckpointUpdate) (issuance, evidence []byte, subtrees [][]lockstep.SubtreeSignature, err error) {
 	var finalErr error
 	if s.faults.UpdateCallback != nil {
 		apply, err := s.faults.UpdateCallback()
 		finalErr = err
 		if !apply {
-			return nil, nil, finalErr
+			return nil, nil, nil, finalErr
 		}
 	}
-	issuance, evidence, err = s.CheckpointSigner.Update(ctx, u)
+	issuance, evidence, subtrees, err = s.CheckpointSigner.Update(ctx, u)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if finalErr != nil {
-		return nil, nil, finalErr
+		return nil, nil, nil, finalErr
 	}
 	if s.faults.UpdateResult != nil {
-		issuance, evidence = s.faults.UpdateResult(issuance, evidence)
+		issuance, evidence, subtrees = s.faults.UpdateResult(u, issuance, evidence, subtrees)
 	}
-	return issuance, evidence, nil
+	return issuance, evidence, subtrees, nil
 }
 
 // failUpdate returns an UpdateCallback that fails every update. If persist is
@@ -191,8 +191,8 @@ func failUpdate(persist bool) func() (apply bool, err error) {
 	}
 }
 
-func verifiers(signers []*torchwood.CosignatureSigner) []note.Verifier {
-	var verifiers []note.Verifier
+func verifiers(signers []*torchwood.CosignatureSigner) []*torchwood.CosignatureVerifier {
+	var verifiers []*torchwood.CosignatureVerifier
 	for _, s := range signers {
 		verifiers = append(verifiers, s.Verifier())
 	}
@@ -201,11 +201,11 @@ func verifiers(signers []*torchwood.CosignatureSigner) []note.Verifier {
 
 func newTestSigner(t testing.TB, name string) *torchwood.CosignatureSigner {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
+	key, err := mldsa.GenerateKey(mldsa.MLDSA44())
 	fatalIfErr(t, err)
 	s, err := torchwood.NewCosignatureSigner(name, key)
 	fatalIfErr(t, err)
-	t.Logf("%s key: %x", name, key)
+	t.Logf("%s key: %x", name, key.Bytes())
 	return s
 }
 
@@ -433,7 +433,11 @@ func (tl *TestLogs) checkSide(side logSide, lockCheckpoint torchwood.Checkpoint)
 
 func openCheckpoint(t testing.TB, origin string, signers []*torchwood.CosignatureSigner, b []byte) torchwood.Checkpoint {
 	t.Helper()
-	n, err := note.Open(b, note.VerifierList(verifiers(signers)...))
+	var noteVerifiers []note.Verifier
+	for _, v := range verifiers(signers) {
+		noteVerifiers = append(noteVerifiers, v)
+	}
+	n, err := note.Open(b, note.VerifierList(noteVerifiers...))
 	fatalIfErr(t, err)
 	if len(n.Sigs) != len(signers) {
 		t.Errorf("checkpoint has %d signatures, want %d", len(n.Sigs), len(signers))

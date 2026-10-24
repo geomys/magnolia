@@ -913,25 +913,78 @@ func TestFatalError(t *testing.T) {
 	tl.CheckLog(3)
 }
 
-// TestBadSignerOutput verifies that checkpoints returned by the signer are
-// checked before they are published.
+// TestBadSignerOutput verifies that checkpoints and subtree signatures returned
+// by the signer are checked before they are published.
 func TestBadSignerOutput(t *testing.T) {
+	type result func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+		ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature)
+	// signSubtree signs the only subtree in u with s, using hash if not nil.
+	signSubtree := func(t *testing.T, s *torchwood.CosignatureSigner, origin string,
+		u lockstep.CheckpointUpdate, hash *tlog.Hash) [][]lockstep.SubtreeSignature {
+		st := u.FirstSubtrees[0]
+		if hash == nil {
+			hash = &st.Hash
+		}
+		sig, err := s.SignSubtreeRaw(origin, st.Start, st.End, *hash)
+		fatalIfErr(t, err)
+		return [][]lockstep.SubtreeSignature{{{Cosigner: s.Name(), Signature: sig}}}
+	}
 	tests := []struct {
 		name   string
-		result func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte)
+		result result
 	}{
-		{"Swapped", func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte) {
-			return ec, ic
+		{"Swapped", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			return ec, ic, st
 		}},
-		{"OldIssuance", func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte) {
+		{"OldIssuance", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
 			b, err := tl.Config.Backend.Fetch(t.Context(), "issuance/checkpoint")
 			fatalIfErr(t, err)
-			return b, ec
+			return b, ec, st
 		}},
-		{"WrongEvidenceKey", func(t *testing.T, tl *TestLogs, ic, ec []byte) ([]byte, []byte) {
+		{"WrongEvidenceKey", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
 			c := openCheckpoint(t, tl.Config.EvidenceOrigin, tl.Config.EvidenceSigners, ec)
 			return ic, signCheckpoint(t, c.Origin,
-				[]*torchwood.CosignatureSigner{newTestSigner(t, c.Origin)}, c.Tree)
+				[]*torchwood.CosignatureSigner{newTestSigner(t, c.Origin)}, c.Tree), st
+		}},
+		{"MissingSubtrees", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			return ic, ec, nil
+		}},
+		{"NoSubtreeSignatures", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			return ic, ec, [][]lockstep.SubtreeSignature{nil}
+		}},
+		{"ExtraSubtreeSignature", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			return ic, ec, [][]lockstep.SubtreeSignature{{st[0][0], st[0][0]}}
+		}},
+		{"WrongCosignerName", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			sig := st[0][0]
+			sig.Cosigner = "example.com/other"
+			return ic, ec, [][]lockstep.SubtreeSignature{{sig}}
+		}},
+		{"WrongKeyHash", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			sig := st[0][0]
+			sig.KeyHash++
+			return ic, ec, [][]lockstep.SubtreeSignature{{sig}}
+		}},
+		{"WrongSubtreeKey", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			return ic, ec, signSubtree(t, newTestSigner(t, tl.Config.IssuanceOrigin), tl.Config.IssuanceOrigin, u, nil)
+		}},
+		{"WrongSubtreeHash", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			h := tlog.RecordHash([]byte("x"))
+			return ic, ec, signSubtree(t, tl.Config.IssuanceSigners[0], tl.Config.IssuanceOrigin, u, &h)
+		}},
+		{"WrongSubtreeOrigin", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			return ic, ec, signSubtree(t, tl.Config.IssuanceSigners[0], tl.Config.EvidenceOrigin, u, nil)
 		}},
 	}
 	for _, tt := range tests {
@@ -941,8 +994,9 @@ func TestBadSignerOutput(t *testing.T) {
 			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 			tl.CheckLog(1)
 
-			tl.Config.Faults.UpdateResult = func(ic, ec []byte) ([]byte, []byte) {
-				return tt.result(t, tl, ic, ec)
+			tl.Config.Faults.UpdateResult = func(u lockstep.CheckpointUpdate,
+				ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+				return tt.result(t, tl, u, ic, ec, st)
 			}
 			addEntryExpectFailure(t, tl)
 			sequenceExpectFailure(t, tl)

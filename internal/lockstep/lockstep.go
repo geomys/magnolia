@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"maps"
 	mathrand "math/rand/v2"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -32,9 +33,9 @@ type Config struct {
 	PoolSize int
 
 	IssuanceOrigin    string
-	IssuanceVerifiers []note.Verifier
+	IssuanceVerifiers []*torchwood.CosignatureVerifier
 	EvidenceOrigin    string
-	EvidenceVerifiers []note.Verifier
+	EvidenceVerifiers []*torchwood.CosignatureVerifier
 }
 
 func (c *Config) validate() error {
@@ -286,8 +287,12 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 	}, nil
 }
 
-func openCheckpoint(origin string, verifiers []note.Verifier, b []byte) (torchwood.Checkpoint, error) {
-	n, err := note.Open(b, note.VerifierList(verifiers...))
+func openCheckpoint(origin string, verifiers []*torchwood.CosignatureVerifier, b []byte) (torchwood.Checkpoint, error) {
+	noteVerifiers := make([]note.Verifier, len(verifiers))
+	for i, v := range verifiers {
+		noteVerifiers[i] = v
+	}
+	n, err := note.Open(b, note.VerifierList(noteVerifiers...))
 	if err != nil {
 		return torchwood.Checkpoint{}, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
@@ -307,6 +312,58 @@ func openCheckpoint(origin string, verifiers []note.Verifier, b []byte) (torchwo
 	}
 
 	return c, nil
+}
+
+// verifySubtree checks that sigs contains exactly one valid subtree
+// cosignature on st from each verifier, and nothing else.
+func verifySubtree(origin string, verifiers []*torchwood.CosignatureVerifier, st Subtree, sigs []SubtreeSignature) error {
+	if len(sigs) != len(verifiers) {
+		return fmt.Errorf("got %d signatures on subtree [%d, %d), expected %d", len(sigs), st.Start, st.End, len(verifiers))
+	}
+	for _, v := range verifiers {
+		i := slices.IndexFunc(sigs, func(sig SubtreeSignature) bool {
+			return sig.Cosigner == v.Name() && sig.KeyHash == v.KeyHash()
+		})
+		if i < 0 {
+			return fmt.Errorf("missing signature from %q on subtree [%d, %d)", v.Name(), st.Start, st.End)
+		}
+		if !v.VerifySubtreeRaw(origin, st.Start, st.End, st.Hash, sigs[i].Signature) {
+			return fmt.Errorf("invalid signature from %q on subtree [%d, %d)", v.Name(), st.Start, st.End)
+		}
+	}
+	return nil
+}
+
+// coveringSubtrees returns the one or two non-empty subtrees that cover the
+// entries [start, end), as described in draft-ietf-plants-merkle-tree-certs,
+// Section 4.5, with their hashes and consistency proofs to the tree of size end.
+func coveringSubtrees(start, end int64, r tlog.HashReader) ([]Subtree, error) {
+	var ranges [][2]int64
+	switch end {
+	case start:
+	case start + 1:
+		ranges = [][2]int64{{start, end}}
+	default:
+		// Two or more entries are always covered by two non-empty subtrees.
+		leftStart, mid, err := torchwood.CoverInterval(start, end)
+		if err != nil {
+			return nil, err
+		}
+		ranges = [][2]int64{{leftStart, mid}, {mid, end}}
+	}
+	var subtrees []Subtree
+	for _, st := range ranges {
+		h, err := torchwood.SubtreeHash(st[0], st[1], r)
+		if err != nil {
+			return nil, err
+		}
+		p, err := torchwood.ProveSubtree(end, st[0], st[1], r)
+		if err != nil {
+			return nil, err
+		}
+		subtrees = append(subtrees, Subtree{Start: st[0], End: st[1], Hash: h, Proof: p})
+	}
+	return subtrees, nil
 }
 
 type tileReader struct {
@@ -500,6 +557,7 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	// 0: issuanceLog, 1: evidenceLog
 	var newStates [2]tlogState
 	var proofs [2]tlog.TreeProof
+	var issuanceSubtrees []Subtree
 	pendingLeaf := [2]func(p *PendingLogEntry) []byte{
 		func(p *PendingLogEntry) []byte { return p.IssuanceLeaf },
 		func(p *PendingLogEntry) []byte { return p.EvidenceLeaf },
@@ -597,6 +655,12 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 				return acmeerrors.Internal("couldn't compute consistency proof: %w", err)
 			}
 		}
+		if i == 0 {
+			issuanceSubtrees, err = coveringSubtrees(l.tree.N, n, hashReader)
+			if err != nil {
+				return acmeerrors.Internal("couldn't compute covering subtrees: %w", err)
+			}
+		}
 
 		newState.tree = tree
 		newState.edgeTiles = edgeTiles
@@ -635,12 +699,13 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 		}
 	}
 
-	issuanceCheckpoint, evidenceCheckpoint, e := ls.c.Signer.Update(ctx, CheckpointUpdate{
-		OldSize:     oldSize,
-		First:       newStates[0].tree,
-		FirstProof:  proofs[0],
-		Second:      newStates[1].tree,
-		SecondProof: proofs[1],
+	issuanceCheckpoint, evidenceCheckpoint, subtreeSignatures, e := ls.c.Signer.Update(ctx, CheckpointUpdate{
+		OldSize:       oldSize,
+		First:         newStates[0].tree,
+		FirstProof:    proofs[0],
+		FirstSubtrees: issuanceSubtrees,
+		Second:        newStates[1].tree,
+		SecondProof:   proofs[1],
 	})
 	if e != nil {
 		// This is a critical error, since we don't know the state of the
@@ -660,6 +725,15 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	} else if c.Tree != newStates[1].tree {
 		return acmeerrors.Internal("%w: signer returned evidence checkpoint for %d %v, expected %d %v", errFatal,
 			c.N, c.Hash, newStates[1].tree.N, newStates[1].tree.Hash)
+	}
+	if len(subtreeSignatures) != len(issuanceSubtrees) {
+		return acmeerrors.Internal("%w: signer returned %d subtree signatures, expected %d", errFatal,
+			len(subtreeSignatures), len(issuanceSubtrees))
+	}
+	for i, st := range issuanceSubtrees {
+		if err := verifySubtree(ls.c.IssuanceOrigin, ls.c.IssuanceVerifiers, st, subtreeSignatures[i]); err != nil {
+			return acmeerrors.Internal("%w: couldn't verify issuance subtree signatures from signer: %w", errFatal, err)
+		}
 	}
 
 	// At this point the pool is fully serialized: new entries were persisted to

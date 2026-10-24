@@ -3,7 +3,7 @@ module geomys.org/magnolia
 go 1.27.3
 
 require (
-	filippo.io/torchwood v0.10.0
+	filippo.io/torchwood v0.10.1-0.20261024135344-1c05157b1fd2
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/mod v0.41.0
 	golang.org/x/sync v0.23.0
