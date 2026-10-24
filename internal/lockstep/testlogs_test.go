@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	mathrand "math/rand/v2"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,22 +64,71 @@ type testConfig struct {
 
 	// Faults is shared by all the signers built from this config.
 	Faults *signerFaults
+
+	// Subtrees records the calls to SubtreesSigned.
+	Subtrees *subtreesHook
+}
+
+// subtreesHook is the [lockstep.Config.SubtreesSigned] hook of the test
+// configs. It records the signed subtrees it is called with, unless Err is set,
+// in which case it returns Err.
+type subtreesHook struct {
+	mu    sync.Mutex
+	calls [][]*lockstep.SignedSubtree
+	Err   error
+}
+
+func (h *subtreesHook) SubtreesSigned(ctx context.Context, subtrees []*lockstep.SignedSubtree) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Err != nil {
+		return h.Err
+	}
+	h.calls = append(h.calls, subtrees)
+	return nil
+}
+
+func (h *subtreesHook) SetErr(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Err = err
+}
+
+// Calls returns the subtrees of each successful call to SubtreesSigned.
+func (h *subtreesHook) Calls() [][]*lockstep.SignedSubtree {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.calls)
+}
+
+func (h *subtreesHook) recorded(st *lockstep.SignedSubtree) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, call := range h.calls {
+		if slices.Contains(call, st) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTestConfig(t testing.TB) testConfig {
 	t.Helper()
+	hook := &subtreesHook{}
 	return testConfig{
 		Config: lockstep.Config{
 			Logger:         slog.New(testLogHandler(t)),
 			Backend:        NewMemoryBackend(t),
 			IssuanceOrigin: issuanceOrigin,
 			EvidenceOrigin: evidenceOrigin,
+			SubtreesSigned: hook.SubtreesSigned,
 		},
 		t:               t,
 		DBPath:          newTestDB(t),
 		IssuanceSigners: []*torchwood.CosignatureSigner{newTestSigner(t, issuanceOrigin)},
 		EvidenceSigners: []*torchwood.CosignatureSigner{newTestSigner(t, evidenceOrigin)},
 		Faults:          &signerFaults{},
+		Subtrees:        hook,
 	}
 }
 
@@ -504,6 +554,7 @@ func waitFuncWrapper(t testing.TB, tl *TestLogs, e *lockstep.PendingLogEntry, ex
 			if se.Leaf != e {
 				t.Error("SequencedEntry.Leaf is not the submitted entry")
 			}
+			tl.checkSubtree(se)
 			tl.sequenced.mu.Lock()
 			if prev, ok := tl.sequenced.m[se.Index]; ok && prev != e {
 				t.Errorf("index %d was assigned to two different entries", se.Index)
@@ -520,6 +571,40 @@ func waitFuncWrapper(t testing.TB, tl *TestLogs, e *lockstep.PendingLogEntry, ex
 		}
 	})
 	return fw
+}
+
+// checkSubtree verifies that se is included in its signed subtree, which is
+// cosigned by the issuance signers and was passed to SubtreesSigned.
+func (tl *TestLogs) checkSubtree(se lockstep.SequencedEntry) {
+	t := tl.t
+	t.Helper()
+	st := se.Subtree
+	if st == nil {
+		t.Errorf("entry %d has no subtree", se.Index)
+		return
+	}
+	if se.Index < st.Start || se.Index >= st.End {
+		t.Errorf("entry %d is not in its subtree [%d, %d)", se.Index, st.Start, st.End)
+	}
+	if err := torchwood.CheckRecordInSubtree(se.Proof, st.Start, st.End, st.Hash,
+		se.Index, tlog.RecordHash(se.Leaf.IssuanceLeaf)); err != nil {
+		t.Errorf("invalid inclusion proof for entry %d in subtree [%d, %d): %v", se.Index, st.Start, st.End, err)
+	}
+	signers := tl.Config.IssuanceSigners
+	if len(st.Signatures) != len(signers) {
+		t.Errorf("subtree [%d, %d) has %d signatures, want %d", st.Start, st.End, len(st.Signatures), len(signers))
+		return
+	}
+	for i, s := range signers {
+		sig := st.Signatures[i]
+		if sig.Cosigner != s.Name() || sig.KeyHash != s.KeyHash() ||
+			!s.Verifier().VerifySubtreeRaw(tl.Config.IssuanceOrigin, st.Start, st.End, st.Hash, sig.Signature) {
+			t.Errorf("invalid signature from %q on subtree [%d, %d)", s.Name(), st.Start, st.End)
+		}
+	}
+	if !tl.Config.Subtrees.recorded(st) {
+		t.Errorf("subtree [%d, %d) of entry %d was not passed to SubtreesSigned", st.Start, st.End, se.Index)
+	}
 }
 
 // testEntry returns an entry whose leaves are determined by seed, with

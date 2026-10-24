@@ -36,6 +36,14 @@ type Config struct {
 	IssuanceVerifiers []*torchwood.CosignatureVerifier
 	EvidenceOrigin    string
 	EvidenceVerifiers []*torchwood.CosignatureVerifier
+
+	// SubtreesSigned, if not nil, is called once for each non-empty sequenced
+	// pool, with the subtree(s) covering the new entries.
+	//
+	// It's called before the AddLeaf wait functions return.
+	//
+	// Any non-nil error will be returned by the AddLeaf wait functions.
+	SubtreesSigned func(ctx context.Context, subtrees []*SignedSubtree) error
 }
 
 func (c *Config) validate() error {
@@ -73,6 +81,9 @@ type Logs struct {
 type tlogState struct {
 	tree tlog.Tree
 	// edgeTiles is a map from level to the right-most tile of that level.
+	//
+	// The map's contents must not be modified, as it might be still in use by
+	// an edgeTilesHashReader after sequencing has completed.
 	edgeTiles map[int]tileWithBytes
 }
 
@@ -399,6 +410,11 @@ type pool struct {
 	// firstLeafIndex is the 0-based index of pendingLeaves[0] in the tree, and
 	// every following entry is sequenced contiguously.
 	firstLeafIndex int64
+	// subtrees are the issuance log subtrees covering the leaves.
+	subtrees []*SignedSubtree
+	// issuanceHashes serves from memory the hashes needed to prove the
+	// inclusion of the leaves in the subtrees.
+	issuanceHashes tlog.HashReader
 }
 
 type PendingLogEntry struct {
@@ -413,8 +429,16 @@ var errPoolFull = acmeerrors.Custom("poolFull", 503, "the pool is full, try agai
 type WaitEntryFunc func(ctx context.Context) (SequencedEntry, error)
 
 type SequencedEntry struct {
-	Index int64
-	Leaf  *PendingLogEntry
+	Index   int64
+	Leaf    *PendingLogEntry
+	Subtree *SignedSubtree
+	Proof   torchwood.RecordInSubtreeProof
+}
+
+type SignedSubtree struct {
+	Start, End int64
+	Hash       tlog.Hash
+	Signatures []SubtreeSignature // in the order of [Config.IssuanceVerifiers]
 }
 
 const maxLeafSize = 65535
@@ -471,7 +495,17 @@ func (ls *Logs) AddLeaf(ctx context.Context, leaf *PendingLogEntry) WaitEntryFun
 				return SequencedEntry{}, p.err
 			}
 			idx := p.firstLeafIndex + int64(n)
-			return SequencedEntry{Index: idx, Leaf: leaf}, nil
+			var st *SignedSubtree
+			for _, st = range p.subtrees {
+				if st.Start <= idx && idx < st.End {
+					break
+				}
+			}
+			proof, err := torchwood.ProveRecordInSubtree(st.Start, st.End, idx, p.issuanceHashes)
+			if err != nil {
+				return SequencedEntry{}, acmeerrors.Internal("couldn't compute inclusion proof for leaf %d: %w", idx, err)
+			}
+			return SequencedEntry{Index: idx, Leaf: leaf, Subtree: st, Proof: proof}, nil
 		}
 	}
 }
@@ -558,6 +592,7 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	var newStates [2]tlogState
 	var proofs [2]tlog.TreeProof
 	var issuanceSubtrees []Subtree
+	var issuanceHashes tlog.HashReader
 	pendingLeaf := [2]func(p *PendingLogEntry) []byte{
 		func(p *PendingLogEntry) []byte { return p.IssuanceLeaf },
 		func(p *PendingLogEntry) []byte { return p.EvidenceLeaf },
@@ -660,6 +695,7 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 			if err != nil {
 				return acmeerrors.Internal("couldn't compute covering subtrees: %w", err)
 			}
+			issuanceHashes = hashReader
 		}
 
 		newState.tree = tree
@@ -730,10 +766,13 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 		return acmeerrors.Internal("%w: signer returned %d subtree signatures, expected %d", errFatal,
 			len(subtreeSignatures), len(issuanceSubtrees))
 	}
+	var signedSubtrees []*SignedSubtree
 	for i, st := range issuanceSubtrees {
 		if err := verifySubtree(ls.c.IssuanceOrigin, ls.c.IssuanceVerifiers, st, subtreeSignatures[i]); err != nil {
 			return acmeerrors.Internal("%w: couldn't verify issuance subtree signatures from signer: %w", errFatal, err)
 		}
+		signedSubtrees = append(signedSubtrees, &SignedSubtree{
+			Start: st.Start, End: st.End, Hash: st.Hash, Signatures: subtreeSignatures[i]})
 	}
 
 	// At this point the pool is fully serialized: new entries were persisted to
@@ -741,6 +780,8 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 	// signer. If we were to crash after this, recovery would be clean from
 	// signer and object storage.
 	p.firstLeafIndex = oldTree.N
+	p.subtrees = signedSubtrees
+	p.issuanceHashes = issuanceHashes
 	ls.issuanceLog = newStates[0]
 	ls.evidenceLog = newStates[1]
 
@@ -770,6 +811,12 @@ func (ls *Logs) sequencePool(ctx context.Context, p *pool) (err acmeerrors.Error
 		if err := ls.c.Backend.Discard(ctx, stagingPath); err != nil {
 			ls.c.Logger.ErrorContext(ctx, "staging bundle discard failed",
 				"tree_size", newSize, "err", err)
+		}
+	}
+
+	if ls.c.SubtreesSigned != nil && len(signedSubtrees) > 0 {
+		if err := ls.c.SubtreesSigned(ctx, signedSubtrees); err != nil {
+			return acmeerrors.Internal("couldn't process signed subtrees: %w", err)
 		}
 	}
 
@@ -862,11 +909,14 @@ func stagingPath(tree1, tree2 tlog.Tree) string {
 }
 
 // edgeTilesHashReader returns hashes from l.edgeTiles.
+//
+// It captures the current edgeTiles map and uses it even after l is updated.
 func (l *tlogState) edgeTilesHashReader() tlog.HashReaderFunc {
+	edgeTiles := l.edgeTiles
 	return func(indexes []int64) ([]tlog.Hash, error) {
 		list := make([]tlog.Hash, 0, len(indexes))
 		for _, id := range indexes {
-			t := l.edgeTiles[tlog.TileForIndex(torchwood.TileHeight, id).L]
+			t := edgeTiles[tlog.TileForIndex(torchwood.TileHeight, id).L]
 			h, err := tlog.HashFromTile(t.Tile, t.B, id)
 			if err != nil {
 				return nil, fmt.Errorf("index %d not in edge tiles: %w", id, err)

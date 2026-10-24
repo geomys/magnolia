@@ -109,6 +109,49 @@ func TestSequenceEmptyPool(t *testing.T) {
 	sequenceTwice(tl, tileWidth+1)
 }
 
+// TestSequenceSubtrees verifies that each pool is covered by one or two signed
+// subtrees, passed once to SubtreesSigned and shared by the entries they cover.
+// The entries themselves are checked against their subtrees by checkSubtree.
+func TestSequenceSubtrees(t *testing.T) {
+	tl := NewEmptyTestLogs(t)
+	var size int64
+	for _, n := range []int64{1, 2, 5, 0, tileWidth + 3, 1, 2} {
+		var waits []lockstep.WaitEntryFunc
+		for range n {
+			waits = append(waits, addEntry(t, tl))
+		}
+		calls := len(tl.Config.Subtrees.Calls())
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		size += n
+		tl.CheckLog(size)
+
+		newCalls := tl.Config.Subtrees.Calls()[calls:]
+		if n == 0 {
+			if len(newCalls) != 0 {
+				t.Errorf("empty pool: SubtreesSigned called %d times", len(newCalls))
+			}
+			continue
+		}
+		if len(newCalls) != 1 {
+			t.Fatalf("pool of %d: SubtreesSigned called %d times, expected once", n, len(newCalls))
+		}
+		subtrees := newCalls[0]
+		if expected := min(n, 2); int64(len(subtrees)) != expected {
+			t.Errorf("pool of %d: got %d subtrees, expected %d", n, len(subtrees), expected)
+		}
+		if subtrees[len(subtrees)-1].End != size {
+			t.Errorf("pool of %d: last subtree ends at %d, expected %d", n, subtrees[len(subtrees)-1].End, size)
+		}
+		for _, wait := range waits {
+			e, err := wait(t.Context())
+			fatalIfErr(t, err)
+			if !slices.Contains(subtrees, e.Subtree) {
+				t.Errorf("entry %d has subtree [%d, %d) from another pool", e.Index, e.Subtree.Start, e.Subtree.End)
+			}
+		}
+	}
+}
+
 func TestSequenceUploadCount(t *testing.T) {
 	tl := NewEmptyTestLogs(t)
 	for i := 0; i < tileWidth+1; i++ {
@@ -526,6 +569,56 @@ func TestSubmissionDuringSequencing(t *testing.T) {
 		t.Errorf("got index %d, expected 1", e.Index)
 	}
 	tl.CheckLog(2)
+}
+
+// TestWaitDuringSequencing verifies that entries can be collected while the
+// next pool is being sequenced, which replaces the edge tiles their inclusion
+// proofs are computed from.
+func TestWaitDuringSequencing(t *testing.T) {
+	tl := NewEmptyTestLogs(t)
+	for range 5 {
+		addEntry(t, tl)
+	}
+	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+
+	// The left covering subtree of this pool starts before it, so the proofs
+	// need hashes from the edge tiles of the previous tree.
+	var entries []*lockstep.PendingLogEntry
+	var waits []lockstep.WaitEntryFunc
+	for i := range tileWidth {
+		e := testEntry(uint64(i))
+		entries = append(entries, e)
+		waits = append(waits, tl.Logs.AddLeaf(t.Context(), e))
+	}
+	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	for range tileWidth {
+		addEntry(t, tl)
+	}
+
+	// The wait functions are called without going through waitFuncWrapper,
+	// and without logging, because the testing.T methods synchronize the
+	// goroutines, which would hide data races from the race detector.
+	tl.Quiet()
+	type result struct {
+		e   lockstep.SequencedEntry
+		err error
+	}
+	results := make([]result, len(waits))
+	var wg sync.WaitGroup
+	for i, wait := range waits {
+		wg.Go(func() {
+			e, err := wait(context.Background())
+			results[i] = result{e, err}
+		})
+	}
+	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	wg.Wait()
+
+	for i, r := range results {
+		wait := func(context.Context) (lockstep.SequencedEntry, error) { return r.e, r.err }
+		waitFuncWrapper(t, tl, entries[i], true, wait)(t.Context())
+	}
+	tl.CheckLog(5 + 2*tileWidth)
 }
 
 func TestReloadLog(t *testing.T) {
@@ -1122,6 +1215,18 @@ func TestSequenceErrors(t *testing.T) {
 			breakSeq:       breakUpload("staging/", true),
 			unbreakSeq:     unbreakUpload,
 			expectProgress: false,
+			expectFatal:    false,
+		},
+		{
+			// The entries are logged, but not returned to the waiters.
+			name: "SubtreesSigned",
+			breakSeq: func(tl *TestLogs) {
+				tl.Config.Subtrees.SetErr(errors.New("subtrees hook error"))
+			},
+			unbreakSeq: func(tl *TestLogs) {
+				tl.Config.Subtrees.SetErr(nil)
+			},
+			expectProgress: true,
 			expectFatal:    false,
 		},
 	}
