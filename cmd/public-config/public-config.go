@@ -34,6 +34,7 @@ var bothConfigFiles = []string{
 	"/etc/systemd/system/memcg-reclaim@.service",
 	"/etc/systemd/system/memcg-reclaim@skylight.timer",
 	"/usr/local/bin/memcg-reclaim",
+	"/etc/ntpd-rs/ntp.toml",
 }
 
 var tuscoloConfigFiles = []string{
