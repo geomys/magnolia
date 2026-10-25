@@ -263,6 +263,8 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 		}
 		seen[id.Value] = true
 		// TODO: validate the identifier!
+		// TODO: limit the number and length of identifiers, to bound the size
+		// of the log entry, which can't exceed 65535 bytes.
 		ord.dnsIdentifiers = append(ord.dnsIdentifiers, id.Value)
 		ord.authz = append(ord.authz, authz{token: rand.Text()})
 	}
