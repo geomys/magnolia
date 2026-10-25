@@ -2,11 +2,13 @@ package lockstep_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"path/filepath"
@@ -306,8 +308,11 @@ func TestCanceledSubmissions(t *testing.T) {
 		t.Errorf("got error %v, expected context.Canceled", err)
 	}
 	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	if _, err := wait(canceled); !errors.Is(err, context.Canceled) {
-		t.Errorf("got error %v, expected context.Canceled", err)
+	// Both the context and the pool are done, and select picks one at random.
+	for range 20 {
+		if _, err := wait(canceled); !errors.Is(err, context.Canceled) {
+			t.Errorf("got error %v, expected context.Canceled", err)
+		}
 	}
 	if e, err := wait(context.Background()); err != nil {
 		t.Errorf("got error %v, expected sequenced entry", err)
@@ -781,6 +786,48 @@ func TestLoadInconsistentState(t *testing.T) {
 			},
 			wantError: "couldn't fetch evidence checkpoint",
 		},
+		{
+			name: "IssuanceTreeTileMissing",
+			corrupt: func(t *testing.T, tl *TestLogs) {
+				delete(tl.Config.Backend.(*MemoryBackend).m, "issuance/tile/0/000.p/3")
+			},
+			wantError: "couldn't fetch issuance right edge tiles",
+		},
+		{
+			name: "EvidenceDataTileMissing",
+			corrupt: func(t *testing.T, tl *TestLogs) {
+				delete(tl.Config.Backend.(*MemoryBackend).m, "evidence/tile/entries/000.p/3")
+			},
+			wantError: "couldn't fetch evidence right edge data tile",
+		},
+		{
+			name: "IssuanceDataTileWrongEntry",
+			corrupt: func(t *testing.T, tl *TestLogs) {
+				rewriteDataTile(t, tl, "issuance/tile/entries/000.p/3", func(b []byte) []byte {
+					b[len(b)-1] ^= 0xff
+					return b
+				})
+			},
+			wantError: "issuance tile leaf entry 2 hashes to",
+		},
+		{
+			name: "IssuanceDataTileTruncated",
+			corrupt: func(t *testing.T, tl *TestLogs) {
+				rewriteDataTile(t, tl, "issuance/tile/entries/000.p/3", func(b []byte) []byte {
+					return b[:len(b)-1]
+				})
+			},
+			wantError: "invalid issuance data tile",
+		},
+		{
+			name: "EvidenceDataTileTrailingData",
+			corrupt: func(t *testing.T, tl *TestLogs) {
+				rewriteDataTile(t, tl, "evidence/tile/entries/000.p/3", func(b []byte) []byte {
+					return append(b, 0)
+				})
+			},
+			wantError: "evidence data tile",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -807,6 +854,23 @@ func TestLoadInconsistentState(t *testing.T) {
 func setLock(t *testing.T, tl *TestLogs, b []byte) {
 	t.Helper()
 	setLockRow(t, tl.Config.DBPath, b)
+}
+
+// rewriteDataTile replaces the data tile at key with f applied to its
+// decompressed contents, bypassing the immutability checks of MemoryBackend.
+func rewriteDataTile(t *testing.T, tl *TestLogs, key string, f func([]byte) []byte) {
+	t.Helper()
+	m := tl.Config.Backend.(*MemoryBackend).m
+	r, err := gzip.NewReader(bytes.NewReader(m[key]))
+	fatalIfErr(t, err)
+	b, err := io.ReadAll(r)
+	fatalIfErr(t, err)
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	_, err = w.Write(f(b))
+	fatalIfErr(t, err)
+	fatalIfErr(t, w.Close())
+	m[key] = buf.Bytes()
 }
 
 func TestCreateLogs(t *testing.T) {
@@ -1020,7 +1084,7 @@ func TestBadSignerOutput(t *testing.T) {
 		}
 		sig, err := s.SignSubtreeRaw(origin, st.Start, st.End, *hash)
 		fatalIfErr(t, err)
-		return [][]lockstep.SubtreeSignature{{{Cosigner: s.Name(), Signature: sig}}}
+		return [][]lockstep.SubtreeSignature{{{Cosigner: s.Name(), KeyHash: s.KeyHash(), Signature: sig}}}
 	}
 	tests := []struct {
 		name   string
@@ -1035,6 +1099,12 @@ func TestBadSignerOutput(t *testing.T) {
 			b, err := tl.Config.Backend.Fetch(t.Context(), "issuance/checkpoint")
 			fatalIfErr(t, err)
 			return b, ec, st
+		}},
+		{"OldEvidence", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
+			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+			b, err := tl.Config.Backend.Fetch(t.Context(), "evidence/checkpoint")
+			fatalIfErr(t, err)
+			return ic, b, st
 		}},
 		{"WrongEvidenceKey", func(t *testing.T, tl *TestLogs, u lockstep.CheckpointUpdate,
 			ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
@@ -1477,6 +1547,20 @@ func TestLocalBackend(t *testing.T) {
 		other[0] ^= 0xff
 		if err := backend.Upload(ctx, key, other, &lockstep.UploadOptions{Immutable: true}); err == nil {
 			t.Error("expected modifying an immutable file to fail")
+		}
+		if err := backend.Upload(ctx, key, append(bytes.Clone(data), 0), &lockstep.UploadOptions{Immutable: true}); err == nil {
+			t.Error("expected extending an immutable file to fail")
+		}
+		if err := backend.Upload(ctx, key, data[:len(data)-1], &lockstep.UploadOptions{Immutable: true}); err == nil {
+			t.Error("expected truncating an immutable file to fail")
+		}
+		fatalIfErr(t, backend.Upload(ctx, "empty", nil, &lockstep.UploadOptions{Immutable: true}))
+		fatalIfErr(t, backend.Upload(ctx, "empty", nil, &lockstep.UploadOptions{Immutable: true}))
+		if err := backend.Upload(ctx, "empty", []byte{0}, &lockstep.UploadOptions{Immutable: true}); err == nil {
+			t.Error("expected extending an empty immutable file to fail")
+		}
+		if err := backend.Upload(ctx, key, nil, &lockstep.UploadOptions{Immutable: true}); err == nil {
+			t.Error("expected emptying an immutable file to fail")
 		}
 		if _, err := backend.Fetch(ctx, "issuance/tile/0/999"); err == nil {
 			t.Error("expected fetching a missing file to fail")

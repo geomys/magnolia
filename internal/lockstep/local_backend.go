@@ -169,7 +169,7 @@ func (s *LocalBackend) Metrics() []prometheus.Collector {
 }
 
 func compareFile(f *os.File, data []byte) error {
-	b := make([]byte, min(len(data), 16384))
+	b := make([]byte, max(min(len(data), 16384), 1))
 	for {
 		n, err := f.Read(b)
 		if err != nil && err != io.EOF {
