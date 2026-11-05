@@ -1,0 +1,80 @@
+# Replay-Nonce presence, uniqueness, and Cache-Control on newNonce are
+# checked by the harness on every response.
+
+HEAD $dir.newNonce
+$code == 200
+
+GET $dir.newNonce
+$code == 204
+
+POST $dir.newAccount
+payload {}
+$code == 201
+
+POST-as-GET $account.url
+sign nonce reuse
+error == badNonce
+
+# The nonce from the error response is usable.
+POST-as-GET $account.url
+
+POST-as-GET $account.url
+sign nonce invalid
+error == badNonce
+
+POST-as-GET $account.url
+sign nonce missing
+error == badNonce
+
+POST-as-GET $account.url
+sign header nonce "not-base64url!"
+error == badNonce
+
+POST-as-GET $account.url
+sign header nonce "AAAA"
+error == badNonce
+
+POST-as-GET $account.url
+sign header nonce 42
+error == malformed
+
+# A verified request spends its nonce even if its payload is rejected.
+POST $account.url
+payload {
+error == malformed
+
+POST-as-GET $account.url
+sign nonce reuse
+error == badNonce
+
+POST-as-GET $account.url
+
+# Nonce eviction is based on spend rate, not elapsed time.
+sleep 1h
+
+POST-as-GET $account.url
+
+# Nonces are bound to the server, not the account: a nonce fetched by one
+# client can be spent by another.
+POST $dir.newAccount as account2
+payload {"termsOfServiceAgreed": true}
+$code == 201
+
+POST-as-GET $account.url
+
+# newNonce errors must not be cached, whether rejected by the handler or
+# by the middleware before the handler runs.
+POST $dir.newNonce
+payload {}
+error == malformed
+
+POST $dir.newNonce
+body not a JWS
+error == malformed
+
+POST-as-GET $dir.newNonce
+sign nonce invalid
+error == badNonce
+
+# The nonce from the error response is usable here too.
+POST-as-GET $dir.newNonce

@@ -1,0 +1,44 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+capture acct = $header.Location
+
+# The inner and outer JWS may use different ML-DSA parameter sets.
+key new65 ML-DSA-65
+
+POST $dir.keyChange
+payload {"account": "$acct", "oldKey": $account.jwk}
+sign inner new65
+$body.status == valid
+
+bind new65 $acct
+
+POST-as-GET $acct as new65
+$body.status == valid
+
+# The old key's algorithm no longer matches the account's key.
+POST-as-GET $acct
+error == malformed
+
+POST $dir.newAccount as new65
+payload {"onlyReturnExisting": true}
+$header.Location == $acct
+
+key new87 ML-DSA-87
+
+POST $dir.keyChange as new65
+payload {"account": "$acct", "oldKey": $new65.jwk}
+sign inner new87
+$body.status == valid
+
+bind new87 $acct
+
+POST-as-GET $acct as new87
+$body.status == valid
+
+POST-as-GET $acct as new65
+error == malformed
+
+POST $dir.newAccount as new87
+payload {"onlyReturnExisting": true}
+$header.Location == $acct

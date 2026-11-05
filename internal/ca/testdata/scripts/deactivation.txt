@@ -1,0 +1,41 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+
+POST $account.url
+payload {"status": "deactivated"}
+$body.status == deactivated
+
+# A deactivated account can't be used for anything.
+POST-as-GET $account.url
+error == unauthorized
+
+POST $account.url
+payload {"status": "valid"}
+error == unauthorized
+
+# Nor recovered through newAccount.
+POST $dir.newAccount
+payload {}
+error == unauthorized
+
+POST $dir.newAccount
+payload {"onlyReturnExisting": true}
+error == unauthorized
+
+POST $dir.keyChange
+payload {"account": "$account.url", "oldKey": $account.jwk}
+sign inner bob
+error == unauthorized
+
+# Other status values are ignored.
+POST $dir.newAccount as carol
+payload {}
+$code == 201
+
+POST $carol.url as carol
+payload {"status": "revoked"}
+$body.status == valid
+
+POST-as-GET $carol.url as carol
+$body.status == valid

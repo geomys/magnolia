@@ -1,0 +1,119 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+
+# A new order is pending, with one authorization per identifier.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "dns", "value": "www.example.org"}]}
+$code == 201
+$body.status == pending
+$body.expires exists
+$body.finalize exists
+$body.identifiers == [{"type":"dns","value":"example.org"},{"type":"dns","value":"www.example.org"}]
+$body.authorizations[1] exists
+$body.authorizations[2] !exists
+$body.error !exists
+capture order = $header.Location
+capture expires = $body.expires
+capture authz0 = $body.authorizations[0]
+capture authz1 = $body.authorizations[1]
+
+POST-as-GET $order
+$body.status == pending
+$body.expires == $expires
+$body.identifiers[1].value == www.example.org
+
+POST-as-GET $authz1
+$body.status == pending
+$body.expires == $expires
+$body.identifier == {"type":"dns","value":"www.example.org"}
+$body.wildcard !exists
+$body.challenges[0].type == http-01
+$body.challenges[0].status == pending
+$body.challenges[0].url exists
+$body.challenges[0].token ~ ^[A-Za-z0-9_-]{22,}$$
+$body.challenges[0].validated !exists
+$body.challenges[1] !exists
+
+POST-as-GET https://magnolia.test/acme/order/does-not-exist
+$code == 404
+
+# Orders and authorizations must not carry a payload.
+POST $order
+payload {}
+error == malformed
+
+POST $authz0
+payload {"status": "deactivated"}
+error == malformed
+
+# Orders belong to the account that created them.
+POST $dir.newAccount as account2
+payload {}
+$code == 201
+
+POST-as-GET $order as account2
+error == unauthorized
+
+POST-as-GET $authz0 as account2
+error == unauthorized
+
+# Wildcard identifiers are rendered as the base name with the wildcard flag.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.example.org"}]}
+$code == 201
+$body.identifiers[0].value == *.example.org
+capture wildcardAuthz = $body.authorizations[0]
+
+POST-as-GET $wildcardAuthz
+$body.identifier.value == example.org
+$body.wildcard == true
+
+# Invalid order requests.
+POST $dir.newOrder
+payload {}
+error == malformed
+
+POST $dir.newOrder
+payload {"identifiers": []}
+error == malformed
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "dns", "value": "example.org"}]}
+error == malformed
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "192.0.2.1"}]}
+error == unsupportedIdentifier
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}], "notBefore": "2000-01-02T00:00:00Z"}
+$code == 400
+$body.type == https://magnolia-ca.com/acme/error/unsupportedField
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}], "notAfter": "2000-01-02T00:00:00Z"}
+$code == 400
+$body.type == https://magnolia-ca.com/acme/error/unsupportedField
+
+POST $dir.newOrder
+payload {"identifiers": "example.org"}
+error == malformed
+
+POST-as-GET $dir.newOrder
+error == malformed
+
+# Orders expire.
+sleep 2h
+
+POST-as-GET $order
+$body.status == pending
+
+sleep 2h
+
+POST-as-GET $order
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/orderNotFound
+
+POST-as-GET $authz0
+$code == 404

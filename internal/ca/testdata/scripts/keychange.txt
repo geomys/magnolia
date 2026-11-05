@@ -1,0 +1,112 @@
+POST $dir.newAccount as alice
+payload {}
+$code == 201
+capture acct = $header.Location
+
+# The payload is a JWS by the new key, with the account URL and the old key.
+POST $dir.keyChange as alice
+payload {"account": "$acct", "oldKey": $alice.jwk}
+sign inner bob
+$body.status == valid
+
+# The new key is bound to the same account, the old key no longer works.
+bind bob $acct
+
+POST-as-GET $acct as bob
+$body.status == valid
+
+POST-as-GET $acct as alice
+error == unauthorized
+
+POST $dir.newAccount as bob
+payload {"onlyReturnExisting": true}
+$code == 200
+$header.Location == $acct
+
+# The old key is free again, and creates a new account.
+POST $dir.newAccount as alice
+payload {}
+$code == 201
+$header.Location != $acct
+
+# Rolling over to a key that belongs to another account fails, and the
+# response points at that account.
+POST $dir.newAccount as carol
+payload {}
+$code == 201
+
+POST $dir.keyChange as bob
+payload {"account": "$acct", "oldKey": $bob.jwk}
+sign inner carol
+error == badPublicKey
+$code == 409
+$header.Location == $carol.url
+
+POST-as-GET $acct as bob
+$body.status == valid
+
+# A deactivated account's key is still reserved.
+POST $carol.url as carol
+payload {"status": "deactivated"}
+$body.status == deactivated
+
+POST $dir.keyChange as bob
+payload {"account": "$acct", "oldKey": $bob.jwk}
+sign inner carol
+error == badPublicKey
+$code == 409
+$header.Location == $carol.url
+
+# Rolling over to the current key is malformed.
+POST $dir.keyChange as bob
+payload {"account": "$acct", "oldKey": $bob.jwk}
+sign inner bob
+error == malformed
+
+# Missing or malformed inner JWS and oldKey are rejected without a rollover.
+POST-as-GET $dir.keyChange as bob
+error == malformed
+
+POST $dir.keyChange as bob
+payload {}
+error == malformed
+
+POST $dir.keyChange as bob
+payload {"account": "$acct", "oldKey": {}}
+sign inner dave
+error == badPublicKey
+
+POST-as-GET $acct as bob
+$body.status == valid
+
+# A second rollover, chained.
+POST $dir.keyChange as bob
+payload {"account": "$acct", "oldKey": $bob.jwk}
+sign inner dave
+$code == 200
+
+bind dave $acct
+
+POST-as-GET $acct as dave
+$body.status == valid
+
+POST-as-GET $acct as bob
+error == unauthorized
+
+# The outer JWS must be signed by the account key, with a kid.
+POST $dir.keyChange as dave
+payload {"account": "$acct", "oldKey": $dave.jwk}
+sign inner eve
+sign key bob
+error == unauthorized
+
+POST $dir.keyChange as dave
+payload {"account": "$acct", "oldKey": $dave.jwk}
+sign inner eve
+sign jwk
+error == malformed
+
+bind eve $acct
+
+POST-as-GET $acct as eve
+error == unauthorized
