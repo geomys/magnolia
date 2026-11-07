@@ -12,10 +12,9 @@ import (
 // tbsParts holds the parts of a DER-encoded TBSCertificate that [LogEntry] and
 // [SetSerial] need. They alias the input of [splitTBS].
 type tbsParts struct {
-	// outer SEQUENCE identifier and length octets: skipped
-	version []byte
-	serial  []byte
-	// signature: skipped
+	version         []byte
+	serial          []byte
+	signatureAlg    []byte
 	issuerToSubject []byte
 	spkiAlg         []byte
 	spki            []byte
@@ -30,14 +29,14 @@ func splitTBS(tbs []byte) (*tbsParts, error) {
 		return nil, errors.New("malformed TBSCertificate")
 	}
 
-	var version, serial cryptobyte.String
+	var version, serial, signature cryptobyte.String
 	if !contents.ReadASN1Element(&version, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific()) {
 		return nil, errors.New("malformed TBSCertificate version")
 	}
 	if !contents.ReadASN1Element(&serial, cryptobyte_asn1.INTEGER) {
 		return nil, errors.New("malformed TBSCertificate serialNumber")
 	}
-	if !contents.SkipASN1( /* signature */ cryptobyte_asn1.SEQUENCE) {
+	if !contents.ReadASN1Element(&signature, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("malformed TBSCertificate signature")
 	}
 
@@ -61,6 +60,7 @@ func splitTBS(tbs []byte) (*tbsParts, error) {
 	return &tbsParts{
 		version:         version,
 		serial:          serial,
+		signatureAlg:    signature,
 		issuerToSubject: issuerToSubject,
 		spkiAlg:         spkiAlg,
 		spki:            spki,

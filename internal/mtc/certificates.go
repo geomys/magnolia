@@ -1,6 +1,7 @@
 package mtc
 
 import (
+	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
@@ -44,6 +45,9 @@ func Certificate(tbs []byte, p *Proof) ([]byte, error) {
 	parts, err := splitTBS(tbs)
 	if err != nil {
 		return nil, err
+	}
+	if !bytes.Equal(parts.signatureAlg, mtcProofAlgorithmIdentifier) {
+		return nil, errors.New("TBSCertificate signature is not id-alg-mtcProof")
 	}
 	serial := cryptobyte.String(parts.serial)
 	var serialNumber uint64

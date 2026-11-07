@@ -410,6 +410,7 @@ func TestCertificateInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherLog := testCert(t, big.NewInt(2<<48)).RawTBSCertificate
+	otherSignature := testCert(t, big.NewInt(1<<48)).RawTBSCertificate
 	for name, tt := range map[string]struct {
 		tbs []byte
 		p   *Proof
@@ -426,6 +427,7 @@ func TestCertificateInvalid(t *testing.T) {
 		"inclusion proof long": {tbs, &Proof{Start: 0, End: 1, InclusionProof: make(torchwood.RecordInSubtreeProof, 1<<11)}},
 		"malformed TBS":        {tbs[:len(tbs)-1], PlaceholderProof()},
 		"other log":            {otherLog, PlaceholderProof()},
+		"other signature":      {otherSignature, PlaceholderProof()},
 	} {
 		if _, err := Certificate(tt.tbs, tt.p); err == nil {
 			t.Errorf("%s: Certificate succeeded", name)
