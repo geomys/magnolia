@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	filippo.io/torchwood v0.10.1-0.20261024135344-1c05157b1fd2
 	github.com/prometheus/client_golang v1.23.2
+	golang.org/x/crypto v0.57.0
 	golang.org/x/mod v0.41.0
 	golang.org/x/sync v0.23.0
 	zombiezen.com/go/sqlite v1.4.2
@@ -24,7 +25,6 @@ require (
 	github.com/prometheus/common v0.69.0 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	modernc.org/libc v1.73.0 // indirect
