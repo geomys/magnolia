@@ -54,7 +54,7 @@ func Certificate(tbs []byte, p *Proof) ([]byte, error) {
 
 	// ValidSubtree rejects negative and reversed bounds, and the index check
 	// below rejects empty subtrees.
-	if p.End > 1<<48 || !torchwood.ValidSubtree(p.Start, p.End) {
+	if p.End >= 1<<48 || !torchwood.ValidSubtree(p.Start, p.End) {
 		return nil, fmt.Errorf("invalid subtree [%d, %d)", p.Start, p.End)
 	}
 	if index < p.Start || index >= p.End {

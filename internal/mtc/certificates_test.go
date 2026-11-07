@@ -420,7 +420,7 @@ func TestCertificateInvalid(t *testing.T) {
 		"unaligned subtree":    {indexed, &Proof{Start: 9, End: 11}},
 		"index after subtree":  {indexed, &Proof{Start: 0, End: 8}},
 		"index before subtree": {indexed, &Proof{Start: 10, End: 11}},
-		"end beyond uint48":    {tbs, &Proof{Start: 0, End: 1<<48 + 1}},
+		"end beyond uint48":    {tbs, &Proof{Start: 0, End: 1 << 48}},
 		"missing cosigner ID":  {tbs, &Proof{Start: 0, End: 1, Cosignatures: []Cosignature{{}}}},
 		"signature too long":   {tbs, &Proof{Start: 0, End: 1, Cosignatures: []Cosignature{{MustParseTrustAnchorID("66252.0"), make([]byte, 1<<16)}}}},
 		"inclusion proof long": {tbs, &Proof{Start: 0, End: 1, InclusionProof: make(torchwood.RecordInSubtreeProof, 1<<11)}},
