@@ -15,6 +15,8 @@ type order struct {
 	created        time.Time
 	dnsIdentifiers []string // with "*." prefix for wildcards
 
+	// mu protects err and the contents of authz.
+	// len(authz) and copies of authz elements don't require holding mu.
 	mu    sync.Mutex
 	err   acmeerrors.Error
 	authz []authz // one per dnsIdentifier
@@ -125,11 +127,7 @@ func (ca *CA) renderOrder(ord *order) map[string]any {
 	return j
 }
 
-func (ca *CA) renderAuthz(ord *order, i int) (map[string]any, acmeerrors.Error) {
-	if i < 0 || i >= len(ord.dnsIdentifiers) {
-		return nil, acmeerrors.Custom("authzNotFound", 404, "authz does not exist")
-	}
-
+func (ca *CA) renderAuthz(ord *order, i int) map[string]any {
 	ord.mu.Lock()
 	authz := ord.authz[i]
 	ord.mu.Unlock()
@@ -147,33 +145,31 @@ func (ca *CA) renderAuthz(ord *order, i int) (map[string]any, acmeerrors.Error) 
 		j["wildcard"] = true
 	}
 
-	if authz.selectedType != "" {
-		c := map[string]any{
-			"type":   authz.selectedType,
-			"status": authz.challStatus(),
-			"url":    ca.challengeURL(ord, i, authz.selectedType),
-			"token":  authz.token,
-		}
-		if !authz.validated.IsZero() {
-			c["validated"] = authz.validated.UTC().Format(time.RFC3339)
-		}
-		if authz.err != nil {
-			c["error"] = acmeerrors.Render(authz.err)
-		}
-		j["challenges"] = []map[string]any{c}
-	} else if !isWildcard {
-		j["challenges"] = []map[string]any{
-			{
-				"type":   "http-01",
-				"status": "pending",
-				"url":    ca.challengeURL(ord, i, "http-01"),
-				"token":  authz.token,
-			},
-		}
-	} else {
+	switch {
+	case authz.selectedType != "":
+		j["challenges"] = []map[string]any{ca.renderChallenge(ord, i, authz, authz.selectedType)}
+	case !isWildcard:
+		j["challenges"] = []map[string]any{ca.renderChallenge(ord, i, authz, "http-01")}
+	default:
 		// TODO: we don't support wildcard challenges yet.
 		j["challenges"] = []map[string]any{}
 	}
 
-	return j, nil
+	return j
+}
+
+func (ca *CA) renderChallenge(ord *order, i int, authz authz, challengeType string) map[string]any {
+	c := map[string]any{
+		"type":   challengeType,
+		"status": authz.challStatus(),
+		"url":    ca.challengeURL(ord, i, challengeType),
+		"token":  authz.token,
+	}
+	if !authz.validated.IsZero() {
+		c["validated"] = authz.validated.UTC().Format(time.RFC3339)
+	}
+	if authz.err != nil {
+		c["error"] = acmeerrors.Render(authz.err)
+	}
+	return c
 }

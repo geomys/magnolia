@@ -137,7 +137,7 @@ func plainGETMiddleware(ca *CA, next acmeHandler) http.Handler {
 func writeResponse(w http.ResponseWriter, resp *response) {
 	if resp.body == nil {
 		for k, v := range resp.headers {
-			w.Header().Set(k, v)
+			w.Header().Add(k, v)
 		}
 		w.WriteHeader(resp.status)
 		return
@@ -148,7 +148,7 @@ func writeResponse(w http.ResponseWriter, resp *response) {
 		return
 	}
 	for k, v := range resp.headers {
-		w.Header().Set(k, v)
+		w.Header().Add(k, v)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.status)

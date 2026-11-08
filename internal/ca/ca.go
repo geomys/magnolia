@@ -87,6 +87,7 @@ func (ca *CA) Handler() http.Handler {
 	mux.Handle(postPrefix+"/new-order", acmeMiddleware(ca, ca.handleNewOrder, withKID))
 	mux.Handle(postPrefix+"/order/{order}", acmeMiddleware(ca, ca.handleOrder, withKID))
 	mux.Handle(postPrefix+"/order/{order}/authz/{i}", acmeMiddleware(ca, ca.handleAuthz, withKID))
+	mux.Handle(postPrefix+"/order/{order}/authz/{i}/challenge/{type}", acmeMiddleware(ca, ca.handleChallenge, withKID))
 
 	return http.MaxBytesHandler(mux, 1<<16) // 64 KiB
 }
@@ -294,9 +295,9 @@ func (ca *CA) handleOrder(payload []byte, r *http.Request) (*response, acmeerror
 	if len(payload) != 0 {
 		return nil, acmeerrors.New("malformed", 400, "unexpected payload for order request")
 	}
-	ord, acmeErr := ca.loadOrder(r.PathValue("order"), r)
-	if acmeErr != nil {
-		return nil, acmeErr
+	ord, err := ca.loadOrder(r.PathValue("order"), r)
+	if err != nil {
+		return nil, err
 	}
 	return respond(200, ca.renderOrder(ord)), nil
 }
@@ -305,17 +306,64 @@ func (ca *CA) handleAuthz(payload []byte, r *http.Request) (*response, acmeerror
 	if len(payload) != 0 {
 		return nil, acmeerrors.New("malformed", 400, "unexpected payload for authz request")
 	}
-	ord, acmeErr := ca.loadOrder(r.PathValue("order"), r)
-	if acmeErr != nil {
-		return nil, acmeErr
+	ord, err := ca.loadOrder(r.PathValue("order"), r)
+	if err != nil {
+		return nil, err
 	}
-	i, err := strconv.Atoi(r.PathValue("i"))
-	if err != nil || strconv.Itoa(i) != r.PathValue("i") || i < 0 {
-		return nil, acmeerrors.Custom("authzNotFound", 404, "authz URL is invalid")
+	i, err := authzIndex(ord, r.PathValue("i"))
+	if err != nil {
+		return nil, err
 	}
-	res, acmeErr := ca.renderAuthz(ord, i)
-	if acmeErr != nil {
-		return nil, acmeErr
+	return respond(200, ca.renderAuthz(ord, i)), nil
+}
+
+func authzIndex(ord *order, s string) (int, acmeerrors.Error) {
+	i, err := strconv.Atoi(s)
+	if err != nil || strconv.Itoa(i) != s || i < 0 {
+		return 0, acmeerrors.Custom("authzNotFound", 404, "authz URL is invalid")
 	}
-	return respond(200, res), nil
+	if i >= len(ord.authz) {
+		return 0, acmeerrors.Custom("authzNotFound", 404, "authz does not exist")
+	}
+	return i, nil
+}
+
+func (ca *CA) handleChallenge(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
+	if len(payload) != 0 {
+		if v := jsontext.Value(payload); !v.IsValid() || v.Kind() != jsontext.KindBeginObject {
+			return nil, acmeerrors.New("malformed", 400, "challenge payload must be a JSON object")
+		}
+	}
+	ord, err := ca.loadOrder(r.PathValue("order"), r)
+	if err != nil {
+		return nil, err
+	}
+	i, err := authzIndex(ord, r.PathValue("i"))
+	if err != nil {
+		return nil, err
+	}
+	typ := r.PathValue("type")
+	if typ != "http-01" || strings.HasPrefix(ord.dnsIdentifiers[i], "*.") {
+		return nil, acmeerrors.Custom("challengeNotFound", 404, "challenge does not exist")
+	}
+
+	ord.mu.Lock()
+	authz := ord.authz[i]
+	if len(payload) != 0 && authz.selectedType == "" {
+		// For now, we don't have a VA, so we immediately mark the challenge as
+		// validated for testing and prototyping. FIXME!
+		now := time.Now()
+		authz.selectedType = typ
+		authz.started = now
+		authz.validated = now
+		ord.authz[i] = authz
+	}
+	ord.mu.Unlock()
+
+	if authz.selectedType != "" && authz.selectedType != typ {
+		return nil, acmeerrors.Custom("challengeNotFound", 404, "challenge does not exist")
+	}
+
+	return respond(200, ca.renderChallenge(ord, i, authz, typ)).
+		WithHeader("Link", `<`+ca.authzURL(ord, i)+`>;rel="up"`), nil
 }

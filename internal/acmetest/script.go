@@ -43,7 +43,8 @@ import (
 //	POST <url> [as <key>]
 //	POST-as-GET <url> [as <key>]
 //
-// A URL is an absolute URL or a variable reference, such as $dir.newAccount.
+// A URL is an absolute URL or starts with a variable reference, such as
+// $dir.newAccount or $order/finalize.
 // Requests without "as" use the key named "account". Keys are created on
 // first use as ML-DSA-44.
 //
@@ -92,7 +93,8 @@ import (
 //	$dir       the directory object, so $dir.newAccount is a URL
 //	$dirURL    the directory URL
 //	$code      the status code of the most recent response
-//	$header    its headers, by canonical name, so $header.Location
+//	$header    its headers, by canonical name, so $header.Location, with
+//	           multiple values joined by ", "
 //	$body      its decoded JSON body
 //	$<key>     a key: .url is the bound account URL, .jwk the public JWK,
 //	           and .alg the JWS algorithm
@@ -186,6 +188,7 @@ var ops = map[string]bool{
 var reserved = map[string]bool{"dir": true, "dirURL": true, "code": true, "header": true, "body": true}
 
 var varRef = regexp.MustCompile(`^\$[A-Za-z0-9_-]+([.\[][^ \t]*)?$`)
+var urlVarRef = regexp.MustCompile(`^\$[A-Za-z0-9_-]`)
 
 func parseScript(file, text string) (*script, error) {
 	s := new(script)
@@ -238,7 +241,7 @@ func parseScript(file, text string) (*script, error) {
 				default:
 					return nil, errorf("usage: %s <url> [as <key>]", what)
 				}
-				if !strings.Contains(cur.url, "://") && !varRef.MatchString(cur.url) {
+				if !strings.Contains(cur.url, "://") && !urlVarRef.MatchString(cur.url) {
 					return nil, errorf("URL must be absolute or a variable reference")
 				}
 			case "sleep":
@@ -427,7 +430,7 @@ func (sc *scope) lookup(name string) (any, bool) {
 		}
 		h := make(map[string]any)
 		for k, v := range sc.resp.Header {
-			h[k] = v[0]
+			h[k] = strings.Join(v, ", ")
 		}
 		return h, true
 	case "body":

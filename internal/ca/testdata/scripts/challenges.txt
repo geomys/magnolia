@@ -1,0 +1,152 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "dns", "value": "www.example.org"}, {"type": "dns", "value": "*.example.org"}]}
+$code == 201
+capture order = $header.Location
+capture authz0 = $body.authorizations[0]
+capture authz1 = $body.authorizations[1]
+capture wildcardAuthz = $body.authorizations[2]
+
+POST-as-GET $authz0
+$body.challenges[0].type == http-01
+capture chall0 = $body.challenges[0].url
+capture token0 = $body.challenges[0].token
+
+POST-as-GET $authz1
+capture chall1 = $body.challenges[0].url
+
+# POST-as-GET returns the challenge without starting it.
+POST-as-GET $chall0
+$body.type == http-01
+$body.status == pending
+$body.url == $chall0
+$body.token == $token0
+$body.validated !exists
+$header.Link contains <$authz0>;rel="up"
+
+POST-as-GET $authz0
+$body.status == pending
+
+# Challenges belong to the account that created the order.
+POST $dir.newAccount as account2
+payload {}
+$code == 201
+
+POST $chall0 as account2
+payload {}
+error == unauthorized
+
+POST-as-GET $authz0
+$body.status == pending
+
+# The payload must be a JSON object.
+POST $chall0
+payload []
+error == malformed
+
+POST $chall0
+payload null
+error == malformed
+
+POST $chall0
+payload {
+error == malformed
+
+POST-as-GET $authz0
+$body.status == pending
+
+# Without a validation authority, challenges succeed immediately.
+POST $chall0
+payload {}
+$body.type == http-01
+$body.status == valid
+$body.url == $chall0
+$body.token == $token0
+$body.validated exists
+$body.error !exists
+$header.Link contains <$authz0>;rel="up"
+capture validated = $body.validated
+
+POST-as-GET $authz0
+$body.status == valid
+$body.challenges[0].status == valid
+$body.challenges[0].validated == $validated
+$body.challenges[1] !exists
+
+# The order is ready only once all its authorizations are valid.
+POST-as-GET $order
+$body.status == pending
+
+# Unknown fields are ignored, and starting a challenge again is a no-op.
+sleep 1h
+
+POST $chall0
+payload {"keyAuthorization": "ignored"}
+$body.status == valid
+$body.validated == $validated
+
+POST $chall1
+payload {}
+$body.status == valid
+
+POST-as-GET $order
+$body.status == pending
+
+# Wildcard identifiers have no challenges.
+POST-as-GET $wildcardAuthz
+$body.challenges == []
+
+POST $wildcardAuthz/challenge/http-01
+payload {}
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/challengeNotFound
+
+# Unknown challenges and authorizations.
+POST $authz1/challenge/dns-01
+payload {}
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/challengeNotFound
+
+POST $order/authz/3/challenge/http-01
+payload {}
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/authzNotFound
+
+POST $order/authz/01/challenge/http-01
+payload {}
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/authzNotFound
+
+POST https://magnolia.test/acme/order/does-not-exist/authz/0/challenge/http-01
+payload {}
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/orderNotFound
+
+# A fully authorized order is ready.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.com"}]}
+$code == 201
+capture order2 = $header.Location
+capture order2Authz = $body.authorizations[0]
+
+POST-as-GET $order2Authz
+capture order2Chall = $body.challenges[0].url
+
+POST $order2Chall
+payload {}
+$body.status == valid
+
+POST-as-GET $order2
+$body.status == ready
+$body.error !exists
+
+# Challenges expire with their order.
+sleep 4h
+
+POST $order2Chall
+payload {}
+$code == 404
+$body.type == https://magnolia-ca.com/acme/error/orderNotFound
