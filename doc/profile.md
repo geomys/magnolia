@@ -97,9 +97,10 @@ lints are ignored because they don't apply to MTCs or to this profile:
   signature algorithm, but CQRP allows it.
 - `e_algorithm_identifier_improper_encoding`: the BRs only list RSA and ECDSA
   key encodings, but CQRP allows ML-DSA.
-- `e_public_key_type_not_allowed`: same, with zcrypto versions that don't
-  recognize ML-DSA keys.
 - `e_sub_cert_aia_missing`: AIA is a SHOULD since SC-104.
 - `w_sub_cert_aia_does_not_contain_issuing_ca_url`: same.
 - `w_ext_subject_key_identifier_missing_sub_cert`: the BRs don't recommend it.
 - `n_ct_sct_policy_count_unsatisfied`: MTCs have no SCTs.
+
+The EV Guidelines and ETSI lint sources are excluded entirely, since the profile
+is not EV and has no qcStatements.
