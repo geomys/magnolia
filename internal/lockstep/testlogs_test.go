@@ -269,7 +269,7 @@ func NewEmptyTestLogsWithConfig(t testing.TB, config testConfig) *TestLogs {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(slog.LevelDebug)
 	config.Logger = slog.New(&levelHandler{config.Logger.Handler(), logLevel})
-	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build()))
+	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build(), nil))
 	tl := &TestLogs{t: t, Config: config, l: logLevel,
 		sequenced: &sequencedEntries{m: make(map[int64]*lockstep.PendingLogEntry)}}
 	tl.CheckLog(0)

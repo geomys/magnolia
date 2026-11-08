@@ -73,12 +73,26 @@ const (
 	// Only log 1 is ever used in Magnolia's profile.
 	logNumber = 1
 
+	// nullEntry is the MTCLogEntryType of an entry that represents nothing.
+	nullEntry = 0
+
 	// tbsCertEntry is the MTCLogEntryType of a TBSCertificateLogEntry.
 	tbsCertEntry = 1
 
 	// maxLogEntrySize is the maximum size of an MTCLogEntry.
 	maxLogEntrySize = 65535
 )
+
+// NullLogEntry returns the MTCLogEntry of type null_entry with no extensions,
+// defined in draft-ietf-plants-merkle-tree-certs-07, Section 5.2.1.
+//
+// Magnolia's issuance logs start with a null entry, so no certificate has index 0.
+func NullLogEntry() []byte {
+	b := cryptobyte.NewBuilder(nil)
+	b.AddUint16(0) // extensions
+	b.AddUint16(nullEntry)
+	return b.BytesOrPanic()
+}
 
 // LogEntry returns the MTCLogEntry for a DER-encoded TBSCertificate, with no
 // extensions and type tbs_cert_entry, constructed as described in

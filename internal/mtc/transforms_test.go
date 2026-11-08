@@ -264,3 +264,9 @@ func TestLogEntryTooLarge(t *testing.T) {
 		t.Error("LogEntry succeeded on an entry over 65535 bytes")
 	}
 }
+
+func TestNullLogEntry(t *testing.T) {
+	if got := NullLogEntry(); !bytes.Equal(got, []byte{0, 0, 0, 0}) {
+		t.Errorf("NullLogEntry() = %x, want 00000000", got)
+	}
+}

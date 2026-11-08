@@ -16,14 +16,15 @@ import (
 
 const directoryURL = "https://magnolia.test/acme/directory"
 
-// newTestCA returns a fresh CA for a test. It must be called inside a
-// synctest bubble.
+// newTestCA returns a fresh CA for a test, with a new issuer whose sequencer
+// is running. It must be called inside a synctest bubble.
 func newTestCA(t testing.TB) (http.Handler, string) {
 	t.Helper()
 	c, err := ca.New(ca.Config{
 		WritePrefix: "https://magnolia.test/acme",
 		NonceKey:    bytes.Repeat([]byte{42}, 32),
 		Accounts:    filepath.Join(t.TempDir(), "accounts.db"),
+		Issuer:      newTestIssuer(t),
 	})
 	if err != nil {
 		t.Fatal(err)

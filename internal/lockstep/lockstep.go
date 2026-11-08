@@ -110,7 +110,8 @@ func (t tileWithBytes) String() string {
 
 var ErrLogExists = errors.New("checkpoints already exist, refusing to initialize logs")
 
-func CreateLogs(ctx context.Context, config Config) error {
+// CreateLogs creates the logs, with first as their first entry if not nil.
+func CreateLogs(ctx context.Context, config Config, first *PendingLogEntry) error {
 	if err := config.validate(); err != nil {
 		return err
 	}
@@ -147,6 +148,21 @@ func CreateLogs(ctx context.Context, config Config) error {
 
 	config.Logger.InfoContext(ctx, "created logs",
 		"issuance", config.IssuanceOrigin, "evidence", config.EvidenceOrigin)
+
+	if first == nil {
+		return nil
+	}
+	ls, err := LoadLogs(ctx, config)
+	if err != nil {
+		return fmt.Errorf("couldn't load created logs: %w", err)
+	}
+	wait := ls.AddLeaf(ctx, first)
+	if err := ls.sequence(ctx); err != nil {
+		return fmt.Errorf("couldn't sequence first entry: %w", err)
+	}
+	if _, err := wait(ctx); err != nil {
+		return fmt.Errorf("couldn't sequence first entry: %w", err)
+	}
 	return nil
 }
 

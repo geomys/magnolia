@@ -873,10 +873,31 @@ func rewriteDataTile(t *testing.T, tl *TestLogs, key string, f func([]byte) []by
 	m[key] = buf.Bytes()
 }
 
+func TestCreateLogsWithFirstEntry(t *testing.T) {
+	config := newTestConfig(t)
+	first := &lockstep.PendingLogEntry{IssuanceLeaf: []byte("first"), EvidenceLeaf: []byte("evidence")}
+	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build(), first))
+
+	logs, err := lockstep.LoadLogs(t.Context(), config.build())
+	fatalIfErr(t, err)
+	tl := &TestLogs{Logs: logs, Config: config, t: t, l: &slog.LevelVar{},
+		sequenced: &sequencedEntries{m: map[int64]*lockstep.PendingLogEntry{0: first}}}
+	tl.CheckLog(1)
+
+	wait := addEntry(t, tl)
+	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	se, err := wait(t.Context())
+	fatalIfErr(t, err)
+	if se.Index != 1 {
+		t.Errorf("got index %d after the first entry, want 1", se.Index)
+	}
+	tl.CheckLog(2)
+}
+
 func TestCreateLogs(t *testing.T) {
 	ctx := context.Background()
 	tl := NewEmptyTestLogs(t)
-	if err := lockstep.CreateLogs(ctx, tl.Config.build()); !errors.Is(err, lockstep.ErrLogExists) {
+	if err := lockstep.CreateLogs(ctx, tl.Config.build(), nil); !errors.Is(err, lockstep.ErrLogExists) {
 		t.Errorf("got error %v, expected ErrLogExists", err)
 	}
 
@@ -888,7 +909,7 @@ func TestCreateLogs(t *testing.T) {
 			fatalIfErr(t, err)
 			fatalIfErr(t, c.Backend.Upload(ctx, side.prefix+"checkpoint",
 				signCheckpoint(t, side.origin, side.signers, tlog.Tree{N: 0, Hash: tree}), nil))
-			if err := lockstep.CreateLogs(ctx, c.build()); err == nil {
+			if err := lockstep.CreateLogs(ctx, c.build(), nil); err == nil {
 				t.Error("expected creation to fail")
 			} else {
 				t.Logf("CreateLogs: %v", err)
@@ -908,7 +929,7 @@ func TestCreateLogs(t *testing.T) {
 		} {
 			c := newTestConfig(t)
 			tt.mutate(&c)
-			if err := lockstep.CreateLogs(ctx, c.build()); err == nil {
+			if err := lockstep.CreateLogs(ctx, c.build(), nil); err == nil {
 				t.Errorf("%s: expected creation to fail", tt.name)
 			}
 			if _, err := lockstep.LoadLogs(ctx, c.build()); err == nil {
@@ -1513,7 +1534,7 @@ func TestLocalBackend(t *testing.T) {
 	tl := NewEmptyTestLogsWithConfig(t, config)
 	tl.Quiet()
 
-	if err := lockstep.CreateLogs(ctx, tl.Config.build()); !errors.Is(err, lockstep.ErrLogExists) {
+	if err := lockstep.CreateLogs(ctx, tl.Config.build(), nil); !errors.Is(err, lockstep.ErrLogExists) {
 		t.Errorf("got error %v, expected ErrLogExists", err)
 	}
 

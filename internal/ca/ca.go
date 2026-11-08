@@ -26,12 +26,14 @@ type CA struct {
 	nonceSpent  *nonce.Spent
 	accounts    *accountStore
 	orders      sync.Map // id string => *[order]
+	issuer      *Issuer
 }
 
 type Config struct {
-	WritePrefix string // e.g. "https://ca.example.com/acme"
-	NonceKey    []byte // 32 bytes
-	Accounts    string // SQLite database path; created if it doesn't exist
+	WritePrefix string  // e.g. "https://ca.example.com/acme"
+	NonceKey    []byte  // 32 bytes
+	Accounts    string  // SQLite database path; created if it doesn't exist
+	Issuer      *Issuer // MTC CA, must run [Issuer.RunSequencer] separately
 }
 
 func New(config Config) (*CA, error) {
@@ -49,6 +51,9 @@ func New(config Config) (*CA, error) {
 	case strings.HasSuffix(u.Path, "/"):
 		return nil, errors.New("WritePrefix must not have a trailing slash")
 	}
+	if config.Issuer == nil {
+		return nil, errors.New("missing Issuer")
+	}
 	issuer, err := nonce.NewIssuer(config.NonceKey)
 	if err != nil {
 		return nil, err
@@ -62,6 +67,7 @@ func New(config Config) (*CA, error) {
 		nonceIssuer: issuer,
 		nonceSpent:  nonce.NewSpent(issuer, 300_000),
 		accounts:    accounts,
+		issuer:      config.Issuer,
 	}, nil
 }
 
