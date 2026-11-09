@@ -84,7 +84,7 @@ error == unauthorized
 POST $finalize
 payload {"csr": "$goodCSR"}
 $body.status == valid
-$body.certificate ~ ^https://magnolia.test/acme/certificate/66252[.]99999[.]1[.]0[.]1/[0-9]{4}-[0-9]{2}-[0-9]{2}/1-[A-Z2-7]{8}$$
+$body.certificate ~ ^https://read.magnolia.test/66252[.]99999[.]1/certificate/1/[0-9]{4}-[0-9]{2}-[0-9]{2}/1-[A-Z2-7]{8}$$
 $body.error !exists
 $header.Location == $order
 capture certificate = $body.certificate

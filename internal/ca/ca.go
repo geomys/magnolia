@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,7 +21,7 @@ import (
 
 type CA struct {
 	// writePrefix is the absolute URL prefix of the ACME endpoints, without a
-	// trailing slash, such as "https://ca.example.com/acme".
+	// trailing slash, such as "https://acme.example.com".
 	writePrefix *url.URL
 	nonceIssuer *nonce.Issuer
 	nonceSpent  *nonce.Spent
@@ -30,26 +31,16 @@ type CA struct {
 }
 
 type Config struct {
-	WritePrefix string  // e.g. "https://ca.example.com/acme"
+	WritePrefix string  // e.g. "https://acme.example.com"
 	NonceKey    []byte  // 32 bytes
-	Accounts    string  // SQLite database path; created if it doesn't exist
+	Accounts    string  // SQLite database path, created with [CreateAccounts]
 	Issuer      *Issuer // MTC CA, must run [Issuer.RunSequencer] separately
 }
 
 func New(config Config) (*CA, error) {
-	u, err := url.Parse(config.WritePrefix)
+	u, err := parsePrefix("WritePrefix", config.WritePrefix)
 	if err != nil {
 		return nil, err
-	}
-	switch {
-	case u.Scheme != "https":
-		return nil, errors.New("WritePrefix must be an https URL")
-	case u.Host == "":
-		return nil, errors.New("WritePrefix must have a host")
-	case u.RawQuery != "" || u.Fragment != "" || u.User != nil:
-		return nil, errors.New("WritePrefix must not have a query, fragment, or userinfo")
-	case strings.HasSuffix(u.Path, "/"):
-		return nil, errors.New("WritePrefix must not have a trailing slash")
 	}
 	if config.Issuer == nil {
 		return nil, errors.New("missing Issuer")
@@ -69,6 +60,25 @@ func New(config Config) (*CA, error) {
 		accounts:    accounts,
 		issuer:      config.Issuer,
 	}, nil
+}
+
+// parsePrefix parses an absolute https URL prefix without a trailing slash.
+func parsePrefix(name, prefix string) (*url.URL, error) {
+	u, err := url.Parse(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	switch {
+	case u.Scheme != "https":
+		return nil, fmt.Errorf("%s must be an https URL", name)
+	case u.Host == "":
+		return nil, fmt.Errorf("%s must have a host", name)
+	case u.RawQuery != "" || u.Fragment != "" || u.User != nil:
+		return nil, fmt.Errorf("%s must not have a query, fragment, or userinfo", name)
+	case strings.HasSuffix(u.Path, "/"):
+		return nil, fmt.Errorf("%s must not have a trailing slash", name)
+	}
+	return u, nil
 }
 
 func (ca *CA) Close() error {

@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"net"
 	"net/http/httptest"
-	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -221,14 +220,9 @@ func TestFinalizeFiles(t *testing.T) {
 			t.Fatalf("no certificate with index 2: %q", certURLs)
 		}
 
-		u, err := url.Parse(certURL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		logID := strings.TrimPrefix(testIssuanceOrigin, "oid/1.3.6.1.4.1.")
-		rest, ok := strings.CutPrefix(u.Path, "/acme/certificate/"+logID+"/")
+		rest, ok := strings.CutPrefix(certURL, testReadPrefix+"/certificate/1/")
 		if !ok {
-			t.Fatalf("certificate URL %s doesn't have the log ID %s", certURL, logID)
+			t.Fatalf("certificate URL %s isn't under ReadPrefix %s", certURL, testReadPrefix)
 		}
 		date, file := path.Split(rest)
 		indexString, token, ok := strings.Cut(file, "-")

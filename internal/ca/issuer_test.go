@@ -30,6 +30,7 @@ const (
 	testCAID           = "66252.99999.1"
 	testIssuanceOrigin = "oid/1.3.6.1.4.1.66252.99999.1.0.1"
 	testEvidenceOrigin = "magnolia.test/evidence"
+	testReadPrefix     = "https://read.magnolia.test/66252.99999.1"
 )
 
 // testSequencingPeriod is long, since empty pools are sequenced too, and
@@ -111,7 +112,7 @@ func newTestIssuerConfig(t testing.TB) ca.IssuerConfig {
 	for _, s := range evidenceSigners {
 		logs.EvidenceVerifiers = append(logs.EvidenceVerifiers, s.Verifier())
 	}
-	return ca.IssuerConfig{CAID: testCAID, Logs: logs, SequencingPeriod: testSequencingPeriod}
+	return ca.IssuerConfig{CAID: testCAID, ReadPrefix: testReadPrefix, Logs: logs, SequencingPeriod: testSequencingPeriod}
 }
 
 func newTestSigner(t testing.TB, name string) *torchwood.CosignatureSigner {
@@ -135,6 +136,8 @@ func TestIssuerConfig(t *testing.T) {
 	}{
 		{"other CA ID", func(c *ca.IssuerConfig) { c.CAID = "66252.99999.2" }, "issuance log origin"},
 		{"invalid CA ID", func(c *ca.IssuerConfig) { c.CAID = "66252" }, "trust anchor ID"},
+		{"no ReadPrefix", func(c *ca.IssuerConfig) { c.ReadPrefix = "" }, "ReadPrefix"},
+		{"ReadPrefix with trailing slash", func(c *ca.IssuerConfig) { c.ReadPrefix += "/" }, "trailing slash"},
 		{"no sequencing period", func(c *ca.IssuerConfig) { c.SequencingPeriod = 0 }, "SequencingPeriod"},
 		{"SubtreesSigned set", func(c *ca.IssuerConfig) {
 			c.Logs.SubtreesSigned = func(context.Context, []*lockstep.SignedSubtree) error { return nil }

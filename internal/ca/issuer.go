@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,19 +28,28 @@ import (
 // Each CA cosigner key is a separate MTC CA, with its own CA ID, so rotating
 // keys means moving issuance to a new Issuer.
 type Issuer struct {
-	logs      *lockstep.Logs
-	backend   lockstep.Backend
-	period    time.Duration
-	caID      mtc.TrustAnchorID
-	logID     mtc.TrustAnchorID
-	cosigners []mtc.TrustAnchorID // in the order of the issuance log verifiers
-	preLint   *lint.Linter
-	postLint  *lint.Linter
+	logs       *lockstep.Logs
+	backend    lockstep.Backend
+	readPrefix *url.URL
+	period     time.Duration
+	caID       mtc.TrustAnchorID
+	cosigners  []mtc.TrustAnchorID // in the order of the issuance log verifiers
+	preLint    *lint.Linter
+	postLint   *lint.Linter
 }
 
 type IssuerConfig struct {
 	// CAID is the CA ID, such as "66252.1".
 	CAID string
+
+	// ReadPrefix is the absolute URL prefix of the read path of this issuer,
+	// without a trailing slash, such as "https://read.example.com/66252.1".
+	// See doc/urls.md. Certificates are served at
+	//
+	//     ReadPrefix + "/certificate/1/<notAfter date>/<index>-<token>"
+	//
+	// where 1 is the log number.
+	ReadPrefix string
 
 	// Logs is the configuration of the issuance and evidence logs.
 	//
@@ -72,6 +82,10 @@ func newIssuer(c *IssuerConfig) (*Issuer, error) {
 	}
 	if c.Logs.IssuanceOrigin != oidPrefix+logID.String() {
 		return nil, fmt.Errorf("issuance log origin must be %q", oidPrefix+logID.String())
+	}
+	readPrefix, err := parsePrefix("ReadPrefix", c.ReadPrefix)
+	if err != nil {
+		return nil, err
 	}
 	if c.SequencingPeriod <= 0 {
 		return nil, errors.New("SequencingPeriod must be positive")
@@ -112,13 +126,13 @@ func newIssuer(c *IssuerConfig) (*Issuer, error) {
 		return nil, err
 	}
 	return &Issuer{
-		backend:   c.Logs.Backend,
-		period:    c.SequencingPeriod,
-		caID:      caID,
-		logID:     logID,
-		cosigners: cosigners,
-		preLint:   preLint,
-		postLint:  postLint,
+		backend:    c.Logs.Backend,
+		readPrefix: readPrefix,
+		period:     c.SequencingPeriod,
+		caID:       caID,
+		cosigners:  cosigners,
+		preLint:    preLint,
+		postLint:   postLint,
 	}, nil
 }
 

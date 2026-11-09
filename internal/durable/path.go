@@ -83,6 +83,38 @@ func WriteFile(name string, data []byte, perm os.FileMode) (err error) {
 	return err
 }
 
+// CreateFile is like [WriteFile], but it fails with an error matching
+// [fs.ErrExist] if the file already exists.
+func CreateFile(name string, data []byte, perm os.FileMode) (err error) {
+	parent, err := os.OpenFile(filepath.Dir(name), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return &os.PathError{Op: "durablecreate", Path: name, Err: err}
+	}
+	defer fsyncAndClose(parent, &err)
+
+	f, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name))
+	if err != nil {
+		return &os.PathError{Op: "durablecreate", Path: name, Err: err}
+	}
+	defer func(tmpname string) {
+		if err == nil {
+			// Unlike rename, link fails if the target exists.
+			err = os.Link(tmpname, name)
+		}
+		// Always remove the temporary name, since it was not renamed.
+		os.Remove(tmpname)
+	}(f.Name())
+	err = f.Chmod(perm)
+	if err != nil {
+		f.Close()
+		return err
+	}
+	defer fsyncAndClose(f, &err)
+
+	_, err = f.Write(data)
+	return err
+}
+
 // MkdirAll behaves like [os.MkdirAll], but it also syncs each affected
 // directory to disk.
 func MkdirAll(path string, perm os.FileMode) (err error) {

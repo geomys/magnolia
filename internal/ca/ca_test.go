@@ -2,8 +2,11 @@ package ca_test
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,10 +30,14 @@ func newTestCA(t testing.TB) (http.Handler, string) {
 // newTestCAWithIssuer is like newTestCA, but with the given issuer.
 func newTestCAWithIssuer(t testing.TB, iss *ca.Issuer) http.Handler {
 	t.Helper()
+	accounts := filepath.Join(t.TempDir(), "accounts.db")
+	if err := ca.CreateAccounts(accounts); err != nil {
+		t.Fatal(err)
+	}
 	c, err := ca.New(ca.Config{
 		WritePrefix: "https://magnolia.test/acme",
 		NonceKey:    bytes.Repeat([]byte{42}, 32),
-		Accounts:    filepath.Join(t.TempDir(), "accounts.db"),
+		Accounts:    accounts,
 		Issuer:      iss,
 	})
 	if err != nil {
@@ -169,6 +176,54 @@ func TestKeyChangeInner(t *testing.T) {
 		resp = c.Do(&acmetest.Request{Method: "POST", URL: account.KID, Key: account})
 		if resp.StatusCode != 200 {
 			t.Errorf("account key no longer works: %d %s", resp.StatusCode, resp.Body)
+		}
+	})
+}
+
+// TestAccountsDatabase checks that the CA only opens databases made by
+// CreateAccounts.
+func TestAccountsDatabase(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		iss, _ := newTestIssuer(t)
+		dir := t.TempDir()
+		newCA := func(accounts string) error {
+			c, err := ca.New(ca.Config{
+				WritePrefix: "https://magnolia.test/acme",
+				NonceKey:    bytes.Repeat([]byte{42}, 32),
+				Accounts:    accounts,
+				Issuer:      iss,
+			})
+			if err == nil {
+				c.Close()
+			}
+			return err
+		}
+
+		missing := filepath.Join(dir, "missing.db")
+		if err := newCA(missing); err == nil {
+			t.Error("CA opened a missing accounts database")
+		}
+		if _, err := os.Stat(missing); err == nil {
+			t.Error("CA created the accounts database")
+		}
+
+		empty := filepath.Join(dir, "empty.db")
+		if err := os.WriteFile(empty, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := newCA(empty); err == nil {
+			t.Error("CA opened an accounts database without the accounts table")
+		}
+
+		created := filepath.Join(dir, "accounts.db")
+		if err := ca.CreateAccounts(created); err != nil {
+			t.Fatal(err)
+		}
+		if err := ca.CreateAccounts(created); !errors.Is(err, fs.ErrExist) {
+			t.Errorf("CreateAccounts over existing file: got %v, want ErrExist", err)
+		}
+		if err := newCA(created); err != nil {
+			t.Error(err)
 		}
 	})
 }

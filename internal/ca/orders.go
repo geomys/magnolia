@@ -115,7 +115,7 @@ func (ca *CA) challengeURL(ord *order, i int, challengeType string) string {
 }
 
 func (ca *CA) certificateURL(cert *issuedCert) string {
-	return fmt.Sprintf("%s/certificate/%s/%s/%d-%s", ca.writePrefix.String(), ca.issuer.logID, cert.notAfter.Format(time.DateOnly), cert.index, cert.token)
+	return fmt.Sprintf("%s/certificate/1/%s/%d-%s", ca.issuer.readPrefix.String(), cert.notAfter.Format(time.DateOnly), cert.index, cert.token)
 }
 
 func (ca *CA) renderOrder(ord *order) map[string]any {

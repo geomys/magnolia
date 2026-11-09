@@ -17,6 +17,7 @@ import (
 
 	"filippo.io/torchwood"
 	"geomys.org/magnolia/internal/acmeerrors"
+	"geomys.org/magnolia/internal/durable"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -109,6 +110,26 @@ type SQLiteSigner struct {
 }
 
 var _ CheckpointSigner = &SQLiteSigner{}
+
+// CreateSQLiteLockDatabase creates the lock database of a [SQLiteSigner] at
+// path. It fails with an error matching [fs.ErrExist] if the file exists.
+//
+// To avoid misconfiguration, [NewSQLiteSigner] never creates the database.
+func CreateSQLiteLockDatabase(path string) error {
+	if err := durable.CreateFile(path, nil, 0o600); err != nil {
+		return err
+	}
+	conn, err := sqlite.OpenConn(path, sqlite.OpenReadWrite)
+	if err != nil {
+		return err
+	}
+	if err := sqlitex.ExecuteTransient(conn,
+		"CREATE TABLE locks (origin TEXT PRIMARY KEY, body BLOB NOT NULL) STRICT", nil); err != nil {
+		conn.Close()
+		return err
+	}
+	return conn.Close()
+}
 
 func NewSQLiteSigner(ctx context.Context, path string, l *slog.Logger,
 	firstOrigin string, firstSigners []*torchwood.CosignatureSigner,

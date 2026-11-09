@@ -2,6 +2,10 @@ package lockstep_test
 
 import (
 	"context"
+	"errors"
+	"io/fs"
+	"log/slog"
+	"path/filepath"
 	"testing"
 
 	"filippo.io/torchwood"
@@ -235,4 +239,23 @@ func TestSQLiteSigner(t *testing.T) {
 		t.Error("expected stale update after second signer to fail")
 	}
 	checkLatest(9)
+}
+
+func TestCreateSQLiteLockDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock.db")
+	if _, err := lockstep.NewSQLiteSigner(t.Context(), path, slog.New(slog.DiscardHandler),
+		"example.com/first", nil, "example.com/second", nil); err == nil {
+		t.Error("NewSQLiteSigner created the lock database")
+	}
+	fatalIfErr(t, lockstep.CreateSQLiteLockDatabase(path))
+	if err := lockstep.CreateSQLiteLockDatabase(path); !errors.Is(err, fs.ErrExist) {
+		t.Errorf("CreateSQLiteLockDatabase over existing file: got %v, want ErrExist", err)
+	}
+	s, err := lockstep.NewSQLiteSigner(t.Context(), path, slog.New(slog.DiscardHandler),
+		"example.com/first", nil, "example.com/second", nil)
+	fatalIfErr(t, err)
+	defer s.Close()
+	if _, _, err := s.Checkpoints(t.Context()); !errors.Is(err, lockstep.ErrLogNotFound) {
+		t.Errorf("Checkpoints on a new lock database: got %v, want ErrLogNotFound", err)
+	}
 }

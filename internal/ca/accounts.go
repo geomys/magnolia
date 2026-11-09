@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"geomys.org/magnolia/internal/acmeerrors"
+	"geomys.org/magnolia/internal/durable"
 	"geomys.org/magnolia/internal/jws"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
@@ -23,12 +24,41 @@ type account struct {
 	deactivated bool
 }
 
+// CreateAccounts creates the accounts database at path.
+// It fails if the file already exists.
+func CreateAccounts(path string) error {
+	if err := durable.CreateFile(path, nil, 0o600); err != nil {
+		return err
+	}
+	conn, err := sqlite.OpenConn(path, sqlite.OpenReadWrite)
+	if err != nil {
+		return err
+	}
+	// TODO: set PRAGMA user_version and check it in openAccountStore, so the
+	// schema can be migrated. For doc/sqlite-replication.md, make the table
+	// WITHOUT ROWID, and send schema changes as ddl records.
+	if err := sqlitex.ExecuteTransient(conn, `
+		CREATE TABLE accounts (
+			kid TEXT PRIMARY KEY,
+			thumbprint TEXT NOT NULL UNIQUE,
+			alg TEXT NOT NULL,
+			key BLOB NOT NULL,
+			deactivated INTEGER NOT NULL DEFAULT 0
+		) STRICT;`, nil); err != nil {
+		conn.Close()
+		return err
+	}
+	return conn.Close()
+}
+
+// openAccountStore opens a database created with [CreateAccounts].
 func openAccountStore(path string) (*accountStore, error) {
 	if path == "" {
 		// SQLite would open a separate temporary database per connection.
 		return nil, errors.New("accounts database path must be set")
 	}
 	pool, err := sqlitex.NewPool(path, sqlitex.PoolOptions{
+		Flags: sqlite.OpenReadWrite | sqlite.OpenWAL | sqlite.OpenURI,
 		PrepareConn: func(conn *sqlite.Conn) error {
 			// Accounts are authoritative, so make every commit durable.
 			return sqlitex.ExecuteTransient(conn, `PRAGMA synchronous = FULL;`, nil)
@@ -40,20 +70,13 @@ func openAccountStore(path string) (*accountStore, error) {
 	conn, err := pool.Take(context.Background())
 	if err != nil {
 		pool.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to open accounts database: %w", err)
 	}
-	err = sqlitex.ExecuteTransient(conn, `
-		CREATE TABLE IF NOT EXISTS accounts (
-			kid TEXT PRIMARY KEY,
-			thumbprint TEXT NOT NULL UNIQUE,
-			alg TEXT NOT NULL,
-			key BLOB NOT NULL,
-			deactivated INTEGER NOT NULL DEFAULT 0
-		) STRICT;`, nil)
+	err = sqlitex.ExecuteTransient(conn, `SELECT kid, thumbprint, alg, key, deactivated FROM accounts LIMIT 0;`, nil)
 	pool.Put(conn)
 	if err != nil {
 		pool.Close()
-		return nil, err
+		return nil, fmt.Errorf("invalid accounts database: %w", err)
 	}
 	return &accountStore{pool: pool}, nil
 }
