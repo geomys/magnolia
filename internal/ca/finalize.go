@@ -50,7 +50,8 @@ func (ca *CA) handleFinalize(payload []byte, r *http.Request) (*response, acmeer
 
 	// TODO: EvidenceLeaf, a minimal record of the authorizations.
 	evidence := []byte(ca.orderURL(ord))
-	index, err := ca.issuer.issue(r.Context(), pub, ord.dnsIdentifiers, issuedAt, evidence)
+	token := certToken()
+	index, err := ca.issuer.issue(r.Context(), pub, ord.dnsIdentifiers, issuedAt, token, evidence)
 
 	ord.mu.Lock()
 	switch {
@@ -61,6 +62,7 @@ func (ca *CA) handleFinalize(payload []byte, r *http.Request) (*response, acmeer
 		ord.err = err
 	default:
 		ord.index = index
+		ord.token = token
 	}
 	ord.mu.Unlock()
 	if err != nil {

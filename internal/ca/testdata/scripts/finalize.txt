@@ -84,7 +84,7 @@ error == unauthorized
 POST $finalize
 payload {"csr": "$goodCSR"}
 $body.status == valid
-$body.certificate ~ ^https://magnolia.test/acme/certificate/66252[.]99999[.]1[.]0[.]1/[0-9]{4}-[0-9]{2}-[0-9]{2}/1$$
+$body.certificate ~ ^https://magnolia.test/acme/certificate/66252[.]99999[.]1[.]0[.]1/[0-9]{4}-[0-9]{2}-[0-9]{2}/1-[A-Z2-7]{8}$$
 $body.error !exists
 $header.Location == $order
 capture certificate = $body.certificate
@@ -120,7 +120,7 @@ csr csr2 certKey example.com
 POST $finalize2
 payload {"csr": "$csr2"}
 $body.status == valid
-$body.certificate ~ /2$$
+$body.certificate ~ /2-[A-Z2-7]{8}$$
 
 # ML-DSA-87 keys are supported.
 POST $dir.newOrder
@@ -143,4 +143,4 @@ csr csr3 bigKey example.net
 POST $finalize3
 payload {"csr": "$csr3"}
 $body.status == valid
-$body.certificate ~ /3$$
+$body.certificate ~ /3-[A-Z2-7]{8}$$

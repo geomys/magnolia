@@ -213,7 +213,7 @@ func TestFinalizeFiles(t *testing.T) {
 		}
 		var certURL, name string
 		for i, u := range certURLs {
-			if strings.HasSuffix(u, "/2") {
+			if strings.Contains(u, "/2-") {
 				certURL, name = u, names[i]
 			}
 		}
@@ -230,7 +230,14 @@ func TestFinalizeFiles(t *testing.T) {
 		if !ok {
 			t.Fatalf("certificate URL %s doesn't have the log ID %s", certURL, logID)
 		}
-		date, indexString := path.Split(rest)
+		date, file := path.Split(rest)
+		indexString, token, ok := strings.Cut(file, "-")
+		if !ok {
+			t.Fatalf("certificate URL %s doesn't have a token", certURL)
+		}
+		if len(token) != 8 {
+			t.Errorf("token %q is not 8 characters", token)
+		}
 		index, err := strconv.ParseInt(indexString, 10, 64)
 		if err != nil {
 			t.Fatal(err)
@@ -244,9 +251,9 @@ func TestFinalizeFiles(t *testing.T) {
 			return b
 		}
 
-		tbs := fetch("certs/" + date + "tbs/002")
+		tbs := fetch("certs/" + date + "tbs/002-" + token)
 		// The standalone file followed by the subtrees file is an MTCProof.
-		mtcProof := append(fetch("certs/"+date+"standalone/002"), fetch("subtrees/000-4")...)
+		mtcProof := append(fetch("certs/"+date+"standalone/002-"+token), fetch("subtrees/000-4")...)
 		s := cryptobyte.String(mtcProof)
 		var extensions uint16
 		var start, end uint64

@@ -16,12 +16,13 @@ type order struct {
 	created        time.Time
 	dnsIdentifiers []string // with "*." prefix for wildcards
 
-	// mu protects err, issuedAt, index, and the contents of authz.
+	// mu protects err, issuedAt, index, token, and the contents of authz.
 	// len(authz) and copies of authz elements don't require holding mu.
 	mu       sync.Mutex
 	err      acmeerrors.Error
 	issuedAt time.Time // set when finalization starts
 	index    int64     // != 0 once the order is valid
+	token    string    // random token in the certificate path
 	authz    []authz   // one per dnsIdentifier
 }
 
@@ -36,6 +37,7 @@ type authz struct {
 type issuedCert struct {
 	notAfter time.Time
 	index    int64
+	token    string
 }
 
 // status returns the order's status and, if valid, the issued certificate,
@@ -49,7 +51,7 @@ func (ord *order) status() (status string, cert *issuedCert, err acmeerrors.Erro
 	}
 	if ord.index != 0 {
 		_, notAfter := mtc.Validity(ord.issuedAt)
-		return "valid", &issuedCert{notAfter: notAfter, index: ord.index}, nil
+		return "valid", &issuedCert{notAfter: notAfter, index: ord.index, token: ord.token}, nil
 	}
 	if !ord.issuedAt.IsZero() {
 		return "processing", nil, nil
@@ -113,7 +115,7 @@ func (ca *CA) challengeURL(ord *order, i int, challengeType string) string {
 }
 
 func (ca *CA) certificateURL(cert *issuedCert) string {
-	return fmt.Sprintf("%s/certificate/%s/%s/%d", ca.writePrefix.String(), ca.issuer.logID, cert.notAfter.Format(time.DateOnly), cert.index)
+	return fmt.Sprintf("%s/certificate/%s/%s/%d-%s", ca.writePrefix.String(), ca.issuer.logID, cert.notAfter.Format(time.DateOnly), cert.index, cert.token)
 }
 
 func (ca *CA) renderOrder(ord *order) map[string]any {

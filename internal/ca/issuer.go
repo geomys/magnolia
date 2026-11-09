@@ -3,6 +3,8 @@ package ca
 import (
 	"context"
 	"crypto/mldsa"
+	"crypto/rand"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"slices"
@@ -166,13 +168,14 @@ var issueTimeout = 30 * time.Second
 
 // issue builds and lints the TBSCertificate, adds its entry to the log, waits
 // for it to be sequenced and cosigned, assembles and lints the standalone
-// certificate, and writes its files. It returns the index of the entry.
+// certificate, and writes its files, with token in their paths. It returns the
+// index of the entry.
 //
 // If it returns [lockstep.ErrPoolFull], the entry was not added to the log.
 //
 // Once the entry is added, the certificate is issued regardless of what the
 // client does, so issue doesn't respect the cancellation of ctx.
-func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []string, issuedAt time.Time, evidence []byte) (int64, acmeerrors.Error) {
+func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []string, issuedAt time.Time, token string, evidence []byte) (int64, acmeerrors.Error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), issueTimeout)
 	defer cancel()
 
@@ -227,10 +230,10 @@ func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []s
 	if err != nil {
 		return 0, acmeerrors.Internal("couldn't encode standalone proof: %w", err)
 	}
-	if err := iss.backend.Upload(ctx, certFileKey(notAfter, "tbs", se.Index), tbs, optsCertFile); err != nil {
+	if err := iss.backend.Upload(ctx, certFileKey(notAfter, "tbs", se.Index, token), tbs, optsCertFile); err != nil {
 		return 0, acmeerrors.Internal("couldn't write TBSCertificate: %w", err)
 	}
-	if err := iss.backend.Upload(ctx, certFileKey(notAfter, "standalone", se.Index), standalone, optsCertFile); err != nil {
+	if err := iss.backend.Upload(ctx, certFileKey(notAfter, "standalone", se.Index, token), standalone, optsCertFile); err != nil {
 		return 0, acmeerrors.Internal("couldn't write standalone proof: %w", err)
 	}
 	return se.Index, nil
@@ -252,10 +255,10 @@ func (iss *Issuer) cosignatures(st *lockstep.SignedSubtree) []mtc.Cosignature {
 // next to issuance/ and evidence/. certs/ is sharded by notAfter UTC date, so
 // directories can be pruned once certificates expire.
 //
-//	certs/<YYYY-MM-DD>/tbs/<index>          TBSCertificate, with the serial number set
-//	certs/<YYYY-MM-DD>/standalone/<index>   MTCProof up to the signatures field
-//	certs/<YYYY-MM-DD>/landmark/<index>     MTCProof with no signatures, by the landmarker
-//	subtrees/<start>-<end>                  MTCProof signatures field
+//	certs/<YYYY-MM-DD>/tbs/<index>-<token>          TBSCertificate, with the serial number set
+//	certs/<YYYY-MM-DD>/standalone/<index>-<token>   MTCProof up to the signatures field
+//	certs/<YYYY-MM-DD>/landmark/<index>-<token>     MTCProof with no signatures, by the landmarker
+//	subtrees/<start>-<end>                          MTCProof signatures field
 //
 // Standalone certificates are split into TBS (tbs/), per-certificate proof
 // (standalone/), and per-subtree cosignatures (subtrees/).
@@ -265,11 +268,22 @@ func (iss *Issuer) cosignatures(st *lockstep.SignedSubtree) []mtc.Cosignature {
 // <index> and <start> are split into groups of three digits like tile indexes
 // in c2sp.org/tlog-tiles paths, to keep directories small, so for example the
 // subtree [1234067, 1234100) is at subtrees/x001/x234/067-1234100.
+//
+// <token> is a short random string, generated at issuance, so that certificate
+// paths can't be predicted from the index and certificates can't be scraped by
+// enumerating them.
 
 var optsCertFile = &lockstep.UploadOptions{Immutable: true}
 
-func certFileKey(notAfter time.Time, kind string, index int64) string {
-	return "certs/" + notAfter.Format(time.DateOnly) + "/" + kind + "/" + indexPath(index)
+func certFileKey(notAfter time.Time, kind string, index int64, token string) string {
+	return "certs/" + notAfter.Format(time.DateOnly) + "/" + kind + "/" + indexPath(index) + "-" + token
+}
+
+// certToken returns a random 40-bit token, encoded as 8 base32 characters.
+func certToken() string {
+	b := make([]byte, 5)
+	rand.Read(b)
+	return base32.StdEncoding.EncodeToString(b)
 }
 
 func subtreeKey(st *lockstep.SignedSubtree) string {
