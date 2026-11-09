@@ -152,7 +152,7 @@ func CreateLogs(ctx context.Context, config Config, first *PendingLogEntry) erro
 	if first == nil {
 		return nil
 	}
-	ls, err := LoadLogs(ctx, config)
+	ls, _, err := LoadLogs(ctx, config)
 	if err != nil {
 		return fmt.Errorf("couldn't load created logs: %w", err)
 	}
@@ -166,60 +166,62 @@ func CreateLogs(ctx context.Context, config Config, first *PendingLogEntry) erro
 	return nil
 }
 
-func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
+// LoadLogs loads the logs created with [CreateLogs], and returns them with
+// their size, the number of entries in each log at the time of loading.
+func LoadLogs(ctx context.Context, config Config) (logs *Logs, size int64, err error) {
 	if err := config.validate(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Load the checkpoints from the signer. If we crashed during
 	// serialization, the ones from the signer are going to be the latest.
 	latestIssuance, latestEvidence, err := config.Signer.Checkpoints(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch checkpoints from signer: %w", err)
+		return nil, 0, fmt.Errorf("couldn't fetch checkpoints from signer: %w", err)
 	}
 	config.Logger.DebugContext(ctx, "loaded checkpoints from signer",
 		"issuance", latestIssuance, "evidence", latestEvidence)
 	ic, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceVerifiers, latestIssuance)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't open issuance checkpoint from signer: %w", err)
+		return nil, 0, fmt.Errorf("couldn't open issuance checkpoint from signer: %w", err)
 	}
 	ec, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceVerifiers, latestEvidence)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't open evidence checkpoint from signer: %w", err)
+		return nil, 0, fmt.Errorf("couldn't open evidence checkpoint from signer: %w", err)
 	}
 
 	// Load the checkpoints from the object storage backend, verify them, and
 	// compare them to the lock checkpoint.
 	issuanceCheckpoint, err := config.Backend.Fetch(ctx, "issuance/checkpoint")
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch issuance checkpoint from object storage: %w", err)
+		return nil, 0, fmt.Errorf("couldn't fetch issuance checkpoint from object storage: %w", err)
 	}
 	config.Logger.DebugContext(ctx, "loaded issuance checkpoint from object storage", "checkpoint", issuanceCheckpoint)
 	ic1, err := openCheckpoint(config.IssuanceOrigin, config.IssuanceVerifiers, issuanceCheckpoint)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't open issuance checkpoint from object storage: %w", err)
+		return nil, 0, fmt.Errorf("couldn't open issuance checkpoint from object storage: %w", err)
 	}
 	evidenceCheckpoint, err := config.Backend.Fetch(ctx, "evidence/checkpoint")
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch evidence checkpoint from object storage: %w", err)
+		return nil, 0, fmt.Errorf("couldn't fetch evidence checkpoint from object storage: %w", err)
 	}
 	config.Logger.DebugContext(ctx, "loaded evidence checkpoint from object storage", "checkpoint", evidenceCheckpoint)
 	ec1, err := openCheckpoint(config.EvidenceOrigin, config.EvidenceVerifiers, evidenceCheckpoint)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't open evidence checkpoint from object storage: %w", err)
+		return nil, 0, fmt.Errorf("couldn't open evidence checkpoint from object storage: %w", err)
 	}
 
 	switch {
 	case ic.N != ec.N:
-		return nil, fmt.Errorf("issuance and evidence checkpoints have different sizes: %d != %d", ic.N, ec.N)
+		return nil, 0, fmt.Errorf("issuance and evidence checkpoints have different sizes: %d != %d", ic.N, ec.N)
 	case ic1.N == ic.N && ic1.Hash != ic.Hash:
-		return nil, fmt.Errorf("issuance checkpoint hash mismatch: %x != %x", ic1.Hash, ic.Hash)
+		return nil, 0, fmt.Errorf("issuance checkpoint hash mismatch: %x != %x", ic1.Hash, ic.Hash)
 	case ec1.N == ec.N && ec1.Hash != ec.Hash:
-		return nil, fmt.Errorf("evidence checkpoint hash mismatch: %x != %x", ec1.Hash, ec.Hash)
+		return nil, 0, fmt.Errorf("evidence checkpoint hash mismatch: %x != %x", ec1.Hash, ec.Hash)
 	case ic1.N > ic.N:
-		return nil, fmt.Errorf("issuance checkpoint in object storage is newer than lock checkpoint: %d > %d", ic1.N, ic.N)
+		return nil, 0, fmt.Errorf("issuance checkpoint in object storage is newer than lock checkpoint: %d > %d", ic1.N, ic.N)
 	case ec1.N > ec.N:
-		return nil, fmt.Errorf("evidence checkpoint in object storage is newer than lock checkpoint: %d > %d", ec1.N, ec.N)
+		return nil, 0, fmt.Errorf("evidence checkpoint in object storage is newer than lock checkpoint: %d > %d", ec1.N, ec.N)
 	case ic1.N < ic.N || ec1.N < ec.N:
 		// It's possible that we crashed between committing a new checkpoint to
 		// the lock backend and uploading it to the object storage backend.
@@ -228,10 +230,10 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 			"size", ic.N, "old_issuance_size", ic1.N, "old_evidence_size", ec1.N)
 		stagedUploads, err := fetchAndDecompress(ctx, config.Backend, stagingPath(ic.Tree, ec.Tree))
 		if err != nil {
-			return nil, fmt.Errorf("couldn't fetch staged uploads: %w", err)
+			return nil, 0, fmt.Errorf("couldn't fetch staged uploads: %w", err)
 		}
 		if err := applyStagedUploads(ctx, config.Backend, stagedUploads); err != nil {
-			return nil, fmt.Errorf("couldn't apply staged uploads: %w", err)
+			return nil, 0, fmt.Errorf("couldn't apply staged uploads: %w", err)
 		}
 	}
 
@@ -258,7 +260,7 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 					}
 				}
 			}}).ReadHashes([]int64{tlog.StoredHashIndex(0, c.N-1)}); err != nil {
-			return nil, fmt.Errorf("couldn't fetch %s right edge tiles: %w", logName, err)
+			return nil, 0, fmt.Errorf("couldn't fetch %s right edge tiles: %w", logName, err)
 		}
 
 		// Fetch the right-most data tile.
@@ -266,7 +268,7 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 		dataTile.L = -1
 		dataTile.B, err = fetchAndDecompress(ctx, config.Backend, pathPrefix+dataTile.Path())
 		if err != nil {
-			return nil, fmt.Errorf("couldn't fetch %s right edge data tile: %w", logName, err)
+			return nil, 0, fmt.Errorf("couldn't fetch %s right edge data tile: %w", logName, err)
 		}
 		edgeTiles[-1] = dataTile
 
@@ -276,21 +278,21 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 		for i := start; i < start+int64(dataTile.W); i++ {
 			e, rest, err := torchwood.ReadTileEntry(b)
 			if err != nil {
-				return nil, fmt.Errorf("invalid %s data tile %v: %w", logName, dataTile.Tile, err)
+				return nil, 0, fmt.Errorf("invalid %s data tile %v: %w", logName, dataTile.Tile, err)
 			}
 			b = rest
 
 			got := tlog.RecordHash(e)
 			exp, err := tlog.HashFromTile(edgeTiles[0].Tile, edgeTiles[0].B, tlog.StoredHashIndex(0, i))
 			if err != nil {
-				return nil, fmt.Errorf("couldn't extract hash for %s leaf %d: %w", logName, i, err)
+				return nil, 0, fmt.Errorf("couldn't extract hash for %s leaf %d: %w", logName, i, err)
 			}
 			if got != exp {
-				return nil, fmt.Errorf("%s tile leaf entry %d hashes to %v, level 0 hash is %v", logName, i, got, exp)
+				return nil, 0, fmt.Errorf("%s tile leaf entry %d hashes to %v, level 0 hash is %v", logName, i, got, exp)
 			}
 		}
 		if len(b) != 0 {
-			return nil, fmt.Errorf("%s data tile %v has %d trailing bytes", logName, dataTile.Tile, len(b))
+			return nil, 0, fmt.Errorf("%s data tile %v has %d trailing bytes", logName, dataTile.Tile, len(b))
 		}
 	}
 
@@ -311,7 +313,7 @@ func LoadLogs(ctx context.Context, config Config) (*Logs, error) {
 		},
 		poolGate:    make(chan struct{}, 1),
 		currentPool: newPool(),
-	}, nil
+	}, ic.N, nil
 }
 
 func openCheckpoint(origin string, verifiers []*torchwood.CosignatureVerifier, b []byte) (torchwood.Checkpoint, error) {

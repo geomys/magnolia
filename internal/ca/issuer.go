@@ -107,10 +107,15 @@ func LoadIssuer(ctx context.Context, config IssuerConfig) (*Issuer, error) {
 	if err != nil {
 		return nil, err
 	}
-	iss.logs, err = lockstep.LoadLogs(ctx, config.Logs)
+	logs, size, err := lockstep.LoadLogs(ctx, config.Logs)
 	if err != nil {
 		return nil, err
 	}
+	// No certificate may have index 0, which CreateIssuer fills with a null entry.
+	if size == 0 {
+		return nil, errors.New("issuance log is empty, it must be created with CreateIssuer")
+	}
+	iss.logs = logs
 	return iss, nil
 }
 

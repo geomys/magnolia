@@ -685,7 +685,7 @@ func TestReloadWrongConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := tl.Config
 			tt.mutate(&c)
-			if _, err := lockstep.LoadLogs(context.Background(), c.build()); err == nil {
+			if _, _, err := lockstep.LoadLogs(context.Background(), c.build()); err == nil {
 				t.Error("expected loading to fail")
 			} else {
 				t.Logf("LoadLogs: %v", err)
@@ -839,7 +839,7 @@ func TestLoadInconsistentState(t *testing.T) {
 			tl.CheckLog(3)
 
 			tt.corrupt(t, tl)
-			_, err := lockstep.LoadLogs(ctx, tl.Config.build())
+			_, _, err := lockstep.LoadLogs(ctx, tl.Config.build())
 			if err == nil {
 				t.Fatal("expected loading to fail")
 			}
@@ -878,8 +878,11 @@ func TestCreateLogsWithFirstEntry(t *testing.T) {
 	first := &lockstep.PendingLogEntry{IssuanceLeaf: []byte("first"), EvidenceLeaf: []byte("evidence")}
 	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build(), first))
 
-	logs, err := lockstep.LoadLogs(t.Context(), config.build())
+	logs, size, err := lockstep.LoadLogs(t.Context(), config.build())
 	fatalIfErr(t, err)
+	if size != 1 {
+		t.Errorf("LoadLogs returned size %d, want 1", size)
+	}
 	tl := &TestLogs{Logs: logs, Config: config, t: t, l: &slog.LevelVar{},
 		sequenced: &sequencedEntries{m: map[int64]*lockstep.PendingLogEntry{0: first}}}
 	tl.CheckLog(1)
@@ -932,7 +935,7 @@ func TestCreateLogs(t *testing.T) {
 			if err := lockstep.CreateLogs(ctx, c.build(), nil); err == nil {
 				t.Errorf("%s: expected creation to fail", tt.name)
 			}
-			if _, err := lockstep.LoadLogs(ctx, c.build()); err == nil {
+			if _, _, err := lockstep.LoadLogs(ctx, c.build()); err == nil {
 				t.Errorf("%s: expected loading to fail", tt.name)
 			}
 		}

@@ -273,8 +273,11 @@ func NewEmptyTestLogsWithConfig(t testing.TB, config testConfig) *TestLogs {
 	tl := &TestLogs{t: t, Config: config, l: logLevel,
 		sequenced: &sequencedEntries{m: make(map[int64]*lockstep.PendingLogEntry)}}
 	tl.CheckLog(0)
-	logs, err := lockstep.LoadLogs(context.Background(), config.build())
+	logs, size, err := lockstep.LoadLogs(context.Background(), config.build())
 	fatalIfErr(t, err)
+	if size != 0 {
+		t.Fatalf("LoadLogs returned size %d for new logs", size)
+	}
 	tl.Logs = logs
 	tl.CheckLog(0)
 	return tl
@@ -328,8 +331,11 @@ func (tl *TestLogs) Quiet() {
 
 func ReloadLogs(t testing.TB, tl *TestLogs) *TestLogs {
 	t.Helper()
-	logs, err := lockstep.LoadLogs(context.Background(), tl.Config.build())
+	logs, size, err := lockstep.LoadLogs(context.Background(), tl.Config.build())
 	fatalIfErr(t, err)
+	if ic, _ := tl.lockCheckpoints(); size != ic.N {
+		t.Fatalf("LoadLogs returned size %d, the lock checkpoint has size %d", size, ic.N)
+	}
 	return &TestLogs{t: t,
 		Logs:      logs,
 		Config:    tl.Config,

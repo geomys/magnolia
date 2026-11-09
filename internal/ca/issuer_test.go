@@ -216,3 +216,18 @@ func TestCreateIssuer(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestLoadIssuerEmptyLog checks that an issuer whose logs were not created
+// with CreateIssuer can't be loaded, as its first certificate would have
+// index 0.
+func TestLoadIssuerEmptyLog(t *testing.T) {
+	config := newTestIssuerConfig(t)
+	if err := lockstep.CreateLogs(t.Context(), config.Logs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.LoadIssuer(t.Context(), config); err == nil {
+		t.Error("LoadIssuer succeeded with empty logs")
+	} else if !strings.Contains(err.Error(), "CreateIssuer") {
+		t.Errorf("got error %q, want it to mention CreateIssuer", err)
+	}
+}
