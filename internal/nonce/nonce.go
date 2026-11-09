@@ -72,6 +72,10 @@ func (i *Issuer) Verify(nonce string) (uuid.UUID, acmeerrors.Error) {
 	if err != nil {
 		return uuid.Nil(), acmeerrors.New("badNonce", 400, "failed to decode nonce: %w", err)
 	}
+	// The decoder ignores CR and LF.
+	if len(nonce) != base64.RawURLEncoding.EncodedLen(len(decoded)) {
+		return uuid.Nil(), acmeerrors.New("badNonce", 400, "nonce contains newlines")
+	}
 	if len(decoded) != 17+16 {
 		return uuid.Nil(), acmeerrors.New("badNonce", 400, "invalid nonce length")
 	}

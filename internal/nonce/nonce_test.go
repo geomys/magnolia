@@ -153,6 +153,8 @@ func TestVerifyRejects(t *testing.T) {
 	}
 	reject("empty", "")
 	reject("padded", n+"=")
+	reject("LF", n[:20]+"\n"+n[20:])
+	reject("trailing CRLF", n+"\r\n")
 	reject("garbage", "!!!!")
 	reject("short", enc(raw[:32]))
 	reject("long", enc(append(raw[:33:33], 0)))
@@ -517,10 +519,7 @@ func FuzzVerify(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// The base64 decoder skips newlines; otherwise, the encoding is
-		// canonical.
-		canonical := strings.NewReplacer("\r", "", "\n", "").Replace(nonce)
-		if got := encode(i, id); got != canonical {
+		if got := encode(i, id); got != nonce {
 			t.Errorf("valid nonce %q re-encodes as %q", nonce, got)
 		}
 	})
