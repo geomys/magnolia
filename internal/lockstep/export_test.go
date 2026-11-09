@@ -2,7 +2,6 @@ package lockstep
 
 import "context"
 
-var ErrPoolFull = errPoolFull
 var ErrFatal = errFatal
 
 var JoinLockCheckpoints = joinLockCheckpoints

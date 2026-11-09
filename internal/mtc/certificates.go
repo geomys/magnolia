@@ -65,7 +65,7 @@ func Certificate(tbs []byte, p *Proof) ([]byte, error) {
 		return nil, fmt.Errorf("index %d is not in subtree [%d, %d)", index, p.Start, p.End)
 	}
 	if !slices.IsSortedFunc(p.Cosignatures, func(a, b Cosignature) int {
-		return compareCosignerIDs(a.CosignerID, b.CosignerID)
+		return CompareCosignerIDs(a.CosignerID, b.CosignerID)
 	}) {
 		return nil, errors.New("cosignatures are not ordered by cosigner ID")
 	}
@@ -112,10 +112,10 @@ func Certificate(tbs []byte, p *Proof) ([]byte, error) {
 	return b.Bytes()
 }
 
-// compareCosignerIDs orders cosigner IDs as required by
+// CompareCosignerIDs orders cosigner IDs as required by
 // draft-ietf-plants-merkle-tree-certs-07, Section 6.2: shorter byte strings
 // first, and byte strings of the same length lexicographically.
-func compareCosignerIDs(a, b TrustAnchorID) int {
+func CompareCosignerIDs(a, b TrustAnchorID) int {
 	if c := cmp.Compare(len(a.b), len(b.b)); c != 0 {
 		return c
 	}

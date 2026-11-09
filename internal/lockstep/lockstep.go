@@ -442,7 +442,9 @@ type PendingLogEntry struct {
 
 func newPool() *pool { return &pool{done: make(chan struct{})} }
 
-var errPoolFull = acmeerrors.Custom("poolFull", 503, "the pool is full, try again later")
+// ErrPoolFull is returned by a [WaitEntryFunc] if the leaf was not added
+// because the pool was full.
+var ErrPoolFull = acmeerrors.Custom("poolFull", 503, "the pool is full, try again later")
 
 type WaitEntryFunc func(ctx context.Context) (SequencedEntry, error)
 
@@ -498,7 +500,7 @@ func (ls *Logs) AddLeaf(ctx context.Context, leaf *PendingLogEntry) WaitEntryFun
 	}
 	n := len(p.pendingLeaves)
 	if ls.c.PoolSize > 0 && n >= ls.c.PoolSize {
-		return func(ctx context.Context) (SequencedEntry, error) { return SequencedEntry{}, errPoolFull }
+		return func(ctx context.Context) (SequencedEntry, error) { return SequencedEntry{}, ErrPoolFull }
 	}
 	p.pendingLeaves = append(p.pendingLeaves, leaf)
 	return func(ctx context.Context) (SequencedEntry, error) {
