@@ -92,6 +92,7 @@ func (ca *CA) Handler() http.Handler {
 
 	mux.Handle(postPrefix+"/new-order", acmeMiddleware(ca, ca.handleNewOrder, withKID))
 	mux.Handle(postPrefix+"/order/{order}", acmeMiddleware(ca, ca.handleOrder, withKID))
+	mux.Handle(postPrefix+"/order/{order}/finalize", acmeMiddleware(ca, ca.handleFinalize, withKID))
 	mux.Handle(postPrefix+"/order/{order}/authz/{i}", acmeMiddleware(ca, ca.handleAuthz, withKID))
 	mux.Handle(postPrefix+"/order/{order}/authz/{i}/challenge/{type}", acmeMiddleware(ca, ca.handleChallenge, withKID))
 

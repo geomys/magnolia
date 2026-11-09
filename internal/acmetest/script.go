@@ -2,6 +2,7 @@ package acmetest
 
 import (
 	"crypto/mldsa"
+	"crypto/x509"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -35,6 +36,8 @@ import (
 //	sleep <duration>          advance time
 //	key <name> <ML-DSA-65>    create a key with the given parameter set
 //	bind <key> <url>          record that key is the account key at url
+//	csr <name> <key> <dns>... capture as name a base64url-encoded CSR for
+//	                          the DNS names, signed by key
 //
 // Request lines:
 //
@@ -149,6 +152,7 @@ type paragraph struct {
 	sleep time.Duration
 	key   [2]string // name, params
 	bind  [2]string // key, url
+	csr   []string  // name, key, DNS names
 
 	// Request case.
 	method    string // GET, HEAD, POST, POST-as-GET
@@ -265,6 +269,15 @@ func parseScript(file, text string) (*script, error) {
 					return nil, errorf("usage: bind <key> <url>")
 				}
 				cur.bind = [2]string{k, u}
+			case "csr":
+				fields := strings.Fields(args)
+				if len(fields) < 2 {
+					return nil, errorf("usage: csr <name> <key> <dns name>...")
+				}
+				if reserved[fields[0]] {
+					return nil, errorf("%q is a reserved name", fields[0])
+				}
+				cur.csr = fields
 			default:
 				return nil, errorf("unknown statement %q", what)
 			}
@@ -511,6 +524,17 @@ func (p *paragraph) run(sc *scope) error {
 			return err
 		}
 		k.KID = u
+		return nil
+	case p.csr != nil:
+		name, keyName, names := p.csr[0], p.csr[1], p.csr[2:]
+		if _, ok := sc.c.Keys()[name]; ok {
+			return fmt.Errorf("%q is a key, not a variable", name)
+		}
+		k, err := sc.key(keyName)
+		if err != nil {
+			return err
+		}
+		sc.captures[name] = sc.c.CSR(k, &x509.CertificateRequest{DNSNames: names})
 		return nil
 	}
 

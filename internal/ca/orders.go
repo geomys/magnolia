@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"geomys.org/magnolia/internal/acmeerrors"
+	"geomys.org/magnolia/internal/mtc"
 )
 
 type order struct {
@@ -15,11 +16,13 @@ type order struct {
 	created        time.Time
 	dnsIdentifiers []string // with "*." prefix for wildcards
 
-	// mu protects err and the contents of authz.
+	// mu protects err, issuedAt, index, and the contents of authz.
 	// len(authz) and copies of authz elements don't require holding mu.
-	mu    sync.Mutex
-	err   acmeerrors.Error
-	authz []authz // one per dnsIdentifier
+	mu       sync.Mutex
+	err      acmeerrors.Error
+	issuedAt time.Time // set when finalization starts
+	index    int64     // != 0 once the order is valid
+	authz    []authz   // one per dnsIdentifier
 }
 
 type authz struct {
@@ -30,13 +33,26 @@ type authz struct {
 	err          acmeerrors.Error
 }
 
-// status returns the order's status and, if invalid, the associated error.
-func (ord *order) status() (status string, err acmeerrors.Error) {
+type issuedCert struct {
+	notAfter time.Time
+	index    int64
+}
+
+// status returns the order's status and, if valid, the issued certificate,
+// or if invalid, the associated error.
+func (ord *order) status() (status string, cert *issuedCert, err acmeerrors.Error) {
 	ord.mu.Lock()
 	defer ord.mu.Unlock()
 
 	if ord.err != nil {
-		return "invalid", ord.err
+		return "invalid", nil, ord.err
+	}
+	if ord.index != 0 {
+		_, notAfter := mtc.Validity(ord.issuedAt)
+		return "valid", &issuedCert{notAfter: notAfter, index: ord.index}, nil
+	}
+	if !ord.issuedAt.IsZero() {
+		return "processing", nil, nil
 	}
 
 	status = "ready"
@@ -46,10 +62,10 @@ func (ord *order) status() (status string, err acmeerrors.Error) {
 			status = "pending"
 		case "valid":
 		case "invalid":
-			return "invalid", acmeerrors.New("unauthorized", 400, "authorization failed, check challenge for details")
+			return "invalid", nil, acmeerrors.New("unauthorized", 400, "authorization failed, check challenge for details")
 		}
 	}
-	return status, err
+	return status, nil, nil
 }
 
 func (ord *order) expiry() time.Time {
@@ -96,8 +112,12 @@ func (ca *CA) challengeURL(ord *order, i int, challengeType string) string {
 	return fmt.Sprintf("%s/order/%s/authz/%d/challenge/%s", ca.writePrefix.String(), ord.id, i, challengeType)
 }
 
+func (ca *CA) certificateURL(cert *issuedCert) string {
+	return fmt.Sprintf("%s/certificate/%s/%s/%d", ca.writePrefix.String(), ca.issuer.logID, cert.notAfter.Format(time.DateOnly), cert.index)
+}
+
 func (ca *CA) renderOrder(ord *order) map[string]any {
-	status, ordErr := ord.status()
+	status, cert, ordErr := ord.status()
 
 	j := map[string]any{
 		"status":   status,
@@ -122,6 +142,9 @@ func (ca *CA) renderOrder(ord *order) map[string]any {
 
 	if ordErr != nil {
 		j["error"] = acmeerrors.Render(ordErr)
+	}
+	if cert != nil {
+		j["certificate"] = ca.certificateURL(cert)
 	}
 
 	return j

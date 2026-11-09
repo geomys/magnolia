@@ -72,10 +72,7 @@ func TBSCertificate(t *Template) ([]byte, error) {
 		}
 	}
 
-	// RFC 5280, Section 4.1.2.5.1 requires UTCTime to be expressed in UTC,
-	// with seconds, and cryptobyte's encoding depends on the time.Location.
-	notBefore := t.IssuedAt.UTC().Add(-backdate).Truncate(time.Second)
-	notAfter := notBefore.Add(beforeAfterDelta)
+	notBefore, notAfter := Validity(t.IssuedAt)
 
 	b := cryptobyte.NewBuilder(nil)
 	b.AddASN1(cryptobyte_asn1.SEQUENCE, func(b *cryptobyte.Builder) {
@@ -101,6 +98,15 @@ func TBSCertificate(t *Template) ([]byte, error) {
 		})
 	})
 	return b.Bytes()
+}
+
+// Validity returns the notBefore and notAfter of a certificate issued at
+// issuedAt, in UTC.
+func Validity(issuedAt time.Time) (notBefore, notAfter time.Time) {
+	// RFC 5280, Section 4.1.2.5.1 requires UTCTime to be expressed in UTC,
+	// with seconds, and cryptobyte's encoding depends on the time.Location.
+	notBefore = issuedAt.UTC().Add(-backdate).Truncate(time.Second)
+	return notBefore, notBefore.Add(beforeAfterDelta)
 }
 
 var (

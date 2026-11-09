@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/mldsa"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json/v2"
 	"fmt"
@@ -170,6 +171,16 @@ func (c *Client) NewKey(name string, params mldsa.Parameters) *Key {
 	k := &Key{Name: name, Priv: priv}
 	c.keys[name] = k
 	return k
+}
+
+// CSR returns the base64url encoding of a CSR from template, signed by key.
+func (c *Client) CSR(key *Key, template *x509.CertificateRequest) string {
+	c.t.Helper()
+	der, err := x509.CreateCertificateRequest(rand.Reader, template, key.Priv)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(der)
 }
 
 // Keys returns all keys created so far.
