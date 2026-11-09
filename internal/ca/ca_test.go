@@ -20,11 +20,18 @@ const directoryURL = "https://magnolia.test/acme/directory"
 // is running. It must be called inside a synctest bubble.
 func newTestCA(t testing.TB) (http.Handler, string) {
 	t.Helper()
+	iss, _ := newTestIssuer(t)
+	return newTestCAWithIssuer(t, iss), directoryURL
+}
+
+// newTestCAWithIssuer is like newTestCA, but with the given issuer.
+func newTestCAWithIssuer(t testing.TB, iss *ca.Issuer) http.Handler {
+	t.Helper()
 	c, err := ca.New(ca.Config{
 		WritePrefix: "https://magnolia.test/acme",
 		NonceKey:    bytes.Repeat([]byte{42}, 32),
 		Accounts:    filepath.Join(t.TempDir(), "accounts.db"),
-		Issuer:      newTestIssuer(t),
+		Issuer:      iss,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +44,7 @@ func newTestCA(t testing.TB) (http.Handler, string) {
 	// Nonces minted in the same millisecond the CA started are rejected as
 	// too old, and fake time only advances when everything is idle.
 	time.Sleep(time.Millisecond)
-	return c.Handler(), directoryURL
+	return c.Handler()
 }
 
 // newTestClient returns a client for a fresh CA. It must be called inside a

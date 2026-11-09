@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"geomys.org/magnolia/internal/lint"
 	"geomys.org/magnolia/internal/lockstep"
 	"geomys.org/magnolia/internal/mtc"
+	"golang.org/x/crypto/cryptobyte"
 )
 
 // An Issuer is an MTC CA, as defined in draft-ietf-plants-merkle-tree-certs-07,
@@ -24,6 +26,7 @@ import (
 // keys means moving issuance to a new Issuer.
 type Issuer struct {
 	logs      *lockstep.Logs
+	backend   lockstep.Backend
 	period    time.Duration
 	caID      mtc.TrustAnchorID
 	logID     mtc.TrustAnchorID
@@ -71,6 +74,9 @@ func newIssuer(c *IssuerConfig) (*Issuer, error) {
 	if c.SequencingPeriod <= 0 {
 		return nil, errors.New("SequencingPeriod must be positive")
 	}
+	if c.Logs.SubtreesSigned != nil {
+		return nil, errors.New("Logs.SubtreesSigned must be nil, it's set by the Issuer")
+	}
 	var cosigners []mtc.TrustAnchorID
 	var lintCosigners []lint.Cosigner
 	for _, v := range c.Logs.IssuanceVerifiers {
@@ -104,6 +110,7 @@ func newIssuer(c *IssuerConfig) (*Issuer, error) {
 		return nil, err
 	}
 	return &Issuer{
+		backend:   c.Logs.Backend,
 		period:    c.SequencingPeriod,
 		caID:      caID,
 		logID:     logID,
@@ -132,6 +139,7 @@ func LoadIssuer(ctx context.Context, config IssuerConfig) (*Issuer, error) {
 	if err != nil {
 		return nil, err
 	}
+	config.Logs.SubtreesSigned = iss.subtreesSigned
 	logs, size, err := lockstep.LoadLogs(ctx, config.Logs)
 	if err != nil {
 		return nil, err
@@ -157,8 +165,8 @@ func (iss *Issuer) RunSequencer(ctx context.Context) error {
 var issueTimeout = 30 * time.Second
 
 // issue builds and lints the TBSCertificate, adds its entry to the log, waits
-// for it to be sequenced and cosigned, and assembles and lints the
-// standalone certificate. It returns the index of the entry.
+// for it to be sequenced and cosigned, assembles and lints the standalone
+// certificate, and writes its files. It returns the index of the entry.
 //
 // If it returns [lockstep.ErrPoolFull], the entry was not added to the log.
 //
@@ -213,6 +221,18 @@ func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []s
 		// TODO: log, increment a metric, and trigger a page alert.
 		return 0, acmeerrors.Internal("post-issuance lint failed: %w", err)
 	}
+
+	_, notAfter := mtc.Validity(issuedAt)
+	standalone, err := marshalStandalone(proof)
+	if err != nil {
+		return 0, acmeerrors.Internal("couldn't encode standalone proof: %w", err)
+	}
+	if err := iss.backend.Upload(ctx, certFileKey(notAfter, "tbs", se.Index), tbs, optsCertFile); err != nil {
+		return 0, acmeerrors.Internal("couldn't write TBSCertificate: %w", err)
+	}
+	if err := iss.backend.Upload(ctx, certFileKey(notAfter, "standalone", se.Index), standalone, optsCertFile); err != nil {
+		return 0, acmeerrors.Internal("couldn't write standalone proof: %w", err)
+	}
 	return se.Index, nil
 }
 
@@ -226,4 +246,87 @@ func (iss *Issuer) cosignatures(st *lockstep.SignedSubtree) []mtc.Cosignature {
 		return mtc.CompareCosignerIDs(a.CosignerID, b.CosignerID)
 	})
 	return cs
+}
+
+// Certificates are stored in the issuer backend, under certs/ and subtrees/
+// next to issuance/ and evidence/. certs/ is sharded by notAfter UTC date, so
+// directories can be pruned once certificates expire.
+//
+//	certs/<YYYY-MM-DD>/tbs/<index>          TBSCertificate, with the serial number set
+//	certs/<YYYY-MM-DD>/standalone/<index>   MTCProof up to the signatures field
+//	certs/<YYYY-MM-DD>/landmark/<index>     MTCProof with no signatures, by the landmarker
+//	subtrees/<start>-<end>                  MTCProof signatures field
+//
+// Standalone certificates are split into TBS (tbs/), per-certificate proof
+// (standalone/), and per-subtree cosignatures (subtrees/).
+//
+// Landmark certificates are split into TBS (tbs/) and proof (landmark/).
+//
+// <index> and <start> are split into groups of three digits like tile indexes
+// in c2sp.org/tlog-tiles paths, to keep directories small, so for example the
+// subtree [1234067, 1234100) is at subtrees/x001/x234/067-1234100.
+
+var optsCertFile = &lockstep.UploadOptions{Immutable: true}
+
+func certFileKey(notAfter time.Time, kind string, index int64) string {
+	return "certs/" + notAfter.Format(time.DateOnly) + "/" + kind + "/" + indexPath(index)
+}
+
+func subtreeKey(st *lockstep.SignedSubtree) string {
+	return "subtrees/" + indexPath(st.Start) + "-" + strconv.FormatInt(st.End, 10)
+}
+
+// indexPath formats n like a tile index in c2sp.org/tlog-tiles paths.
+func indexPath(n int64) string {
+	s := fmt.Sprintf("%03d", n%1000)
+	for n >= 1000 {
+		n /= 1000
+		s = fmt.Sprintf("x%03d/", n%1000) + s
+	}
+	return s
+}
+
+// subtreesSigned is the [lockstep.Config.SubtreesSigned] hook.
+// It writes the subtrees files with the standalone cosignatures.
+func (iss *Issuer) subtreesSigned(ctx context.Context, subtrees []*lockstep.SignedSubtree) error {
+	for _, st := range subtrees {
+		b, err := marshalCosignatures(iss.cosignatures(st))
+		if err != nil {
+			return fmt.Errorf("encoding cosignatures of [%d, %d): %w", st.Start, st.End, err)
+		}
+		if err := iss.backend.Upload(ctx, subtreeKey(st), b, optsCertFile); err != nil {
+			return fmt.Errorf("writing cosignatures of [%d, %d): %w", st.Start, st.End, err)
+		}
+	}
+	return nil
+}
+
+// marshalStandalone encodes the fields of an MTCProof before signatures.
+func marshalStandalone(p *mtc.Proof) ([]byte, error) {
+	b := cryptobyte.NewBuilder(nil)
+	b.AddUint16(0) // extensions
+	b.AddUint48(uint64(p.Start))
+	b.AddUint48(uint64(p.End))
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		for _, h := range p.InclusionProof {
+			b.AddBytes(h[:])
+		}
+	})
+	return b.Bytes()
+}
+
+// marshalCosignatures encodes the signatures field of an MTCProof.
+func marshalCosignatures(cs []mtc.Cosignature) ([]byte, error) {
+	b := cryptobyte.NewBuilder(nil)
+	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+		for _, c := range cs {
+			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
+				b.AddBytes(c.CosignerID.Bytes())
+			})
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+				b.AddBytes(c.Signature)
+			})
+		}
+	})
+	return b.Bytes()
 }

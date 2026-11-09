@@ -1,19 +1,29 @@
 package ca_test
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"net"
 	"net/http/httptest"
+	"net/url"
+	"path"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"geomys.org/magnolia/internal/acmetest"
+	"geomys.org/magnolia/internal/lint"
+	"geomys.org/magnolia/internal/lockstep"
+	"geomys.org/magnolia/internal/mtc"
+	"golang.org/x/crypto/cryptobyte"
 )
 
 // readyOrder creates an account if needed and a ready order for names, and
@@ -159,4 +169,161 @@ func TestFinalizeConcurrent(t *testing.T) {
 			t.Errorf("order is %v after finalizing, want valid", status)
 		}
 	})
+}
+
+// TestFinalizeFiles checks that the files written at issuance assemble into
+// a valid standalone certificate.
+func TestFinalizeFiles(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		iss, config := newTestIssuer(t)
+		srv := httptest.NewTestServer(t, newTestCAWithIssuer(t, iss))
+		logs := config.Logs
+		priv, err := mldsa.GenerateKey(mldsa.MLDSA65())
+		if err != nil {
+			t.Fatal(err)
+		}
+		certKey := &acmetest.Key{Name: "cert", Priv: priv}
+
+		// Issue four certificates concurrently, so they share a pool after the
+		// null entry, covered by the subtrees [0, 4) and [4, 5), and the
+		// inclusion proofs in the first are not empty. Each client has its
+		// own account.
+		names := []string{"a.example", "b.example", "c.example", "d.example"}
+		finalizeURLs := make([]string, len(names))
+		clients := make([]*acmetest.Client, len(names))
+		for i, name := range names {
+			clients[i] = acmetest.NewClient(t, srv.Client(), directoryURL)
+			_, finalizeURLs[i] = readyOrder(t, clients[i], name, "www."+name)
+		}
+		certURLs := make([]string, len(names))
+		done := make(chan struct{})
+		for i, name := range names {
+			go func() {
+				csr := clients[i].CSR(certKey, &x509.CertificateRequest{DNSNames: []string{name, "www." + name}})
+				resp := finalize(clients[i], finalizeURLs[i], csr)
+				if resp.StatusCode != 200 {
+					t.Errorf("finalize: %d %s", resp.StatusCode, resp.Body)
+				}
+				certURLs[i], _ = resp.JSON.(map[string]any)["certificate"].(string)
+				done <- struct{}{}
+			}()
+		}
+		for range names {
+			<-done
+		}
+		var certURL, name string
+		for i, u := range certURLs {
+			if strings.HasSuffix(u, "/2") {
+				certURL, name = u, names[i]
+			}
+		}
+		if certURL == "" {
+			t.Fatalf("no certificate with index 2: %q", certURLs)
+		}
+
+		u, err := url.Parse(certURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		logID := strings.TrimPrefix(testIssuanceOrigin, "oid/1.3.6.1.4.1.")
+		rest, ok := strings.CutPrefix(u.Path, "/acme/certificate/"+logID+"/")
+		if !ok {
+			t.Fatalf("certificate URL %s doesn't have the log ID %s", certURL, logID)
+		}
+		date, indexString := path.Split(rest)
+		index, err := strconv.ParseInt(indexString, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fetch := func(key string) []byte {
+			t.Helper()
+			b, err := logs.Backend.Fetch(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}
+
+		tbs := fetch("certs/" + date + "tbs/002")
+		// The standalone file followed by the subtrees file is an MTCProof.
+		mtcProof := append(fetch("certs/"+date+"standalone/002"), fetch("subtrees/000-4")...)
+		s := cryptobyte.String(mtcProof)
+		var extensions uint16
+		var start, end uint64
+		var proofHashes, sigs cryptobyte.String
+		if !s.ReadUint16(&extensions) || !s.ReadUint48(&start) || !s.ReadUint48(&end) ||
+			!s.ReadUint16LengthPrefixed(&proofHashes) || !s.ReadUint24LengthPrefixed(&sigs) || !s.Empty() {
+			t.Fatal("malformed MTCProof")
+		}
+		if extensions != 0 {
+			t.Errorf("got extensions %d, want 0", extensions)
+		}
+		proof := &mtc.Proof{Start: int64(start), End: int64(end)}
+		for !proofHashes.Empty() {
+			var h [32]byte
+			if !proofHashes.CopyBytes(h[:]) {
+				t.Fatal("malformed inclusion proof")
+			}
+			proof.InclusionProof = append(proof.InclusionProof, h)
+		}
+		if start != 0 || end != 4 || len(proof.InclusionProof) != 2 {
+			t.Errorf("got subtree [%d, %d) and %d proof hashes, want [0, 4) and 2", start, end, len(proof.InclusionProof))
+		}
+		for !sigs.Empty() {
+			var id, sig cryptobyte.String
+			if !sigs.ReadUint8LengthPrefixed(&id) || !sigs.ReadUint16LengthPrefixed(&sig) {
+				t.Fatal("malformed cosignature")
+			}
+			cosignerID, err := mtc.NewTrustAnchorID(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof.Cosignatures = append(proof.Cosignatures, mtc.Cosignature{CosignerID: cosignerID, Signature: sig})
+		}
+
+		der, err := mtc.Certificate(tbs, proof)
+		if err != nil {
+			t.Fatal(err)
+		}
+		linter, err := lint.Standalone(lintCosigners(t, logs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := linter.Lint(der); err != nil {
+			t.Error(err)
+		}
+
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(cert.Signature, mtcProof) {
+			t.Errorf("certificate signatureValue doesn't match the files")
+		}
+		if want := uint64(1<<48 | index); !cert.SerialNumber.IsUint64() || cert.SerialNumber.Uint64() != want {
+			t.Errorf("serial number is %v, want %v", cert.SerialNumber, want)
+		}
+		if want := cert.NotAfter.UTC().Format(time.DateOnly) + "/"; date != want {
+			t.Errorf("date directory is %s, want the notAfter date %s", date, want)
+		}
+		if got, want := strings.Join(cert.DNSNames, ","), name+",www."+name; got != want {
+			t.Errorf("DNS names are %s, want %s", got, want)
+		}
+		if !certKey.Priv.PublicKey().Equal(cert.PublicKey) {
+			t.Errorf("public key doesn't match the CSR")
+		}
+	})
+}
+
+func lintCosigners(t testing.TB, logs lockstep.Config) []lint.Cosigner {
+	t.Helper()
+	var cosigners []lint.Cosigner
+	for _, v := range logs.IssuanceVerifiers {
+		id, err := mtc.ParseTrustAnchorID(strings.TrimPrefix(v.Name(), "oid/1.3.6.1.4.1."))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cosigners = append(cosigners, lint.Cosigner{ID: id, Key: v.PublicKey().(*mldsa.PublicKey)})
+	}
+	return cosigners
 }

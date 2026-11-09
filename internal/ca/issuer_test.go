@@ -7,10 +7,12 @@ import (
 	"crypto/ed25519"
 	"crypto/mldsa"
 	"crypto/rand"
+	"crypto/x509"
 	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"geomys.org/magnolia/internal/ca"
 	"geomys.org/magnolia/internal/lockstep"
 	"geomys.org/magnolia/internal/mtc"
+	"golang.org/x/crypto/cryptobyte"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
@@ -34,8 +37,8 @@ const (
 const testSequencingPeriod = time.Hour
 
 // newTestIssuer creates and loads a new issuer, and runs its sequencer until
-// the end of the test.
-func newTestIssuer(t testing.TB) *ca.Issuer {
+// the end of the test. It also returns the issuer's configuration.
+func newTestIssuer(t testing.TB) (*ca.Issuer, ca.IssuerConfig) {
 	t.Helper()
 	config := newTestIssuerConfig(t)
 	if err := ca.CreateIssuer(t.Context(), config); err != nil {
@@ -54,7 +57,7 @@ func newTestIssuer(t testing.TB) *ca.Issuer {
 			t.Errorf("sequencer: %v", err)
 		}
 	})
-	return iss
+	return iss, config
 }
 
 // newTestIssuerConfig returns the configuration of an issuer with a new
@@ -133,6 +136,9 @@ func TestIssuerConfig(t *testing.T) {
 		{"other CA ID", func(c *ca.IssuerConfig) { c.CAID = "66252.99999.2" }, "issuance log origin"},
 		{"invalid CA ID", func(c *ca.IssuerConfig) { c.CAID = "66252" }, "trust anchor ID"},
 		{"no sequencing period", func(c *ca.IssuerConfig) { c.SequencingPeriod = 0 }, "SequencingPeriod"},
+		{"SubtreesSigned set", func(c *ca.IssuerConfig) {
+			c.Logs.SubtreesSigned = func(context.Context, []*lockstep.SignedSubtree) error { return nil }
+		}, "SubtreesSigned"},
 		{"missing CA cosigner", func(c *ca.IssuerConfig) {
 			c.Logs.IssuanceVerifiers = c.Logs.IssuanceVerifiers[1:]
 		}, "CA cosigner"},
@@ -230,4 +236,110 @@ func TestLoadIssuerEmptyLog(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "CreateIssuer") {
 		t.Errorf("got error %q, want it to mention CreateIssuer", err)
 	}
+}
+
+func TestIndexPath(t *testing.T) {
+	for _, tt := range []struct {
+		n    int64
+		want string
+	}{
+		{0, "000"},
+		{7, "007"},
+		{999, "999"},
+		{1000, "x001/000"},
+		{1234067, "x001/x234/067"},
+		{1_000_000_000, "x001/x000/x000/000"},
+	} {
+		if got := ca.IndexPath(tt.n); got != tt.want {
+			t.Errorf("indexPath(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
+}
+
+// FuzzProofFiles checks that a TBSCertificate followed by a standalone file and
+// a subtrees file is the certificate built by mtc.Certificate, for any proof it
+// accepts.
+func FuzzProofFiles(f *testing.F) {
+	key, err := mldsa.GenerateKey(mldsa.MLDSA65())
+	if err != nil {
+		f.Fatal(err)
+	}
+	caID, err := mtc.ParseTrustAnchorID("66252.99999.1")
+	if err != nil {
+		f.Fatal(err)
+	}
+	tbs, err := mtc.TBSCertificate(&mtc.Template{
+		CAID:      caID,
+		IssuedAt:  time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC),
+		PublicKey: key.PublicKey(),
+		DNSNames:  []string{"example.com"},
+	})
+	if err != nil {
+		f.Fatal(err)
+	}
+
+	// cosignatures is a sequence of uint8 length-prefixed cosigner IDs, each
+	// followed by a uint16 length-prefixed signature.
+	cosigs := cryptobyte.NewBuilder(nil)
+	for _, id := range []string{"66252.99999.0", "66252.99999.1"} {
+		id, err := mtc.ParseTrustAnchorID(id)
+		if err != nil {
+			f.Fatal(err)
+		}
+		cosigs.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(id.Bytes()) })
+		cosigs.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(make([]byte, 2420)) })
+	}
+	f.Add(int64(2), int64(0), int64(4), make([]byte, 2*32), cosigs.BytesOrPanic())
+	f.Add(int64(0), int64(0), int64(1), []byte{}, []byte{})
+	f.Fuzz(func(t *testing.T, index, start, end int64, hashes, cosignatures []byte) {
+		tbs := bytes.Clone(tbs)
+		if err := mtc.SetSerial(tbs, index); err != nil {
+			return
+		}
+		p := &mtc.Proof{Start: start, End: end}
+		for h := range slices.Chunk(hashes, 32) {
+			if len(h) == 32 {
+				p.InclusionProof = append(p.InclusionProof, [32]byte(h))
+			}
+		}
+		s := cryptobyte.String(cosignatures)
+		for !s.Empty() {
+			var id, sig cryptobyte.String
+			if !s.ReadUint8LengthPrefixed(&id) || !s.ReadUint16LengthPrefixed(&sig) {
+				return
+			}
+			cosignerID, err := mtc.NewTrustAnchorID(id)
+			if err != nil {
+				return
+			}
+			p.Cosignatures = append(p.Cosignatures, mtc.Cosignature{CosignerID: cosignerID, Signature: sig})
+		}
+		slices.SortFunc(p.Cosignatures, func(a, b mtc.Cosignature) int {
+			return mtc.CompareCosignerIDs(a.CosignerID, b.CosignerID)
+		})
+
+		der, err := mtc.Certificate(tbs, p)
+		if err != nil {
+			return
+		}
+		standalone, err := ca.MarshalStandalone(p)
+		if err != nil {
+			t.Fatalf("marshalStandalone: %v", err)
+		}
+		cosigs, err := ca.MarshalCosignatures(p.Cosignatures)
+		if err != nil {
+			t.Fatalf("marshalCosignatures: %v", err)
+		}
+
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(cert.RawTBSCertificate, tbs) {
+			t.Error("certificate tbsCertificate is not the TBSCertificate")
+		}
+		if !bytes.Equal(cert.Signature, append(standalone, cosigs...)) {
+			t.Error("certificate signatureValue is not the standalone file followed by the subtrees file")
+		}
+	})
 }
