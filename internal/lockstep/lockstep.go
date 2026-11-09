@@ -40,9 +40,9 @@ type Config struct {
 	// SubtreesSigned, if not nil, is called once for each non-empty sequenced
 	// pool, with the subtree(s) covering the new entries.
 	//
-	// It's called before the AddLeaf wait functions return.
+	// It's called before the corresponding AddLeaf calls return.
 	//
-	// Any non-nil error will be returned by the AddLeaf wait functions.
+	// Any non-nil error will be returned by those AddLeaf calls.
 	SubtreesSigned func(ctx context.Context, subtrees []*SignedSubtree) error
 }
 
@@ -71,9 +71,9 @@ type Logs struct {
 	// multiple AddLeaf calls under load. It's a one-slot channel so that
 	// it can be selected with a context and a timeout.
 	poolGate chan struct{}
-	// poolMu is held for the entire duration of AddLeaf, and by
-	// RunSequencer while rotating currentPool. This guarantees that
-	// AddLeaf will never add to a pool that already started sequencing.
+	// poolMu is held by AddLeaf while adding to currentPool, and by
+	// RunSequencer while rotating it. This guarantees that AddLeaf will
+	// never add to a pool that already started sequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
 }
@@ -152,16 +152,21 @@ func CreateLogs(ctx context.Context, config Config, first *PendingLogEntry) erro
 	if first == nil {
 		return nil
 	}
+	if err := checkLeaf(first); err != nil {
+		return err
+	}
 	ls, _, err := LoadLogs(ctx, config)
 	if err != nil {
 		return fmt.Errorf("couldn't load created logs: %w", err)
 	}
-	wait := ls.AddLeaf(ctx, first)
+	// Nothing else can be using these new logs, so the leaf can go straight
+	// into the first pool.
+	ls.currentPool.pendingLeaves = append(ls.currentPool.pendingLeaves, first)
 	if err := ls.sequence(ctx); err != nil {
 		return fmt.Errorf("couldn't sequence first entry: %w", err)
 	}
-	if _, err := wait(ctx); err != nil {
-		return fmt.Errorf("couldn't sequence first entry: %w", err)
+	if ls.currentPool.err != nil {
+		return fmt.Errorf("couldn't sequence first entry: %w", ls.currentPool.err)
 	}
 	return nil
 }
@@ -442,11 +447,9 @@ type PendingLogEntry struct {
 
 func newPool() *pool { return &pool{done: make(chan struct{})} }
 
-// ErrPoolFull is returned by a [WaitEntryFunc] if the leaf was not added
+// ErrPoolFull is returned by [Logs.AddLeaf] if the leaf was not added
 // because the pool was full.
 var ErrPoolFull = acmeerrors.Custom("poolFull", 503, "the pool is full, try again later")
-
-type WaitEntryFunc func(ctx context.Context) (SequencedEntry, error)
 
 type SequencedEntry struct {
 	Index   int64
@@ -463,71 +466,71 @@ type SignedSubtree struct {
 
 const maxLeafSize = 65535
 
-// AddLeaf adds leaf to the current pool. It returns a function that will
-// wait until the pool is sequenced and return the sequenced leaf.
-func (ls *Logs) AddLeaf(ctx context.Context, leaf *PendingLogEntry) WaitEntryFunc {
-	errFunc := func(format string, a ...any) WaitEntryFunc {
-		return func(ctx context.Context) (SequencedEntry, error) {
-			return SequencedEntry{}, acmeerrors.Internal(format, a...)
-		}
-	}
-
-	if len(leaf.IssuanceLeaf) > maxLeafSize || len(leaf.EvidenceLeaf) > maxLeafSize {
-		return errFunc("leaf too large: issuance %d, evidence %d", len(leaf.IssuanceLeaf), len(leaf.EvidenceLeaf))
-	}
-	if len(leaf.IssuanceLeaf) == 0 || len(leaf.EvidenceLeaf) == 0 {
-		return errFunc("leaf cannot be empty: issuance %d, evidence %d", len(leaf.IssuanceLeaf), len(leaf.EvidenceLeaf))
+// AddLeaf adds leaf to the current pool, waits until the pool is sequenced,
+// and returns the sequenced leaf.
+func (ls *Logs) AddLeaf(ctx context.Context, leaf *PendingLogEntry) (SequencedEntry, error) {
+	if err := checkLeaf(leaf); err != nil {
+		return SequencedEntry{}, err
 	}
 
 	select {
 	case ls.poolGate <- struct{}{}:
-		defer func() { <-ls.poolGate }()
 	case <-ctx.Done():
-		err := ctx.Err()
-		return errFunc("context canceled while queued for the pool: %w", err)
+		return SequencedEntry{}, acmeerrors.Internal("context canceled while queued for the pool: %w", ctx.Err())
 	}
 	ls.poolMu.Lock()
-	defer ls.poolMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return errFunc("context canceled while queued for the pool: %w", err)
-	}
 	if testingOnlyPauseAddLeaf != nil {
 		testingOnlyPauseAddLeaf()
 	}
 	p := ls.currentPool
-	if err := p.err; err != nil {
-		return func(ctx context.Context) (SequencedEntry, error) { return SequencedEntry{}, err }
-	}
 	n := len(p.pendingLeaves)
-	if ls.c.PoolSize > 0 && n >= ls.c.PoolSize {
-		return func(ctx context.Context) (SequencedEntry, error) { return SequencedEntry{}, ErrPoolFull }
+	var err error
+	switch {
+	case ctx.Err() != nil:
+		err = acmeerrors.Internal("context canceled while queued for the pool: %w", ctx.Err())
+	case p.err != nil:
+		err = p.err
+	case ls.c.PoolSize > 0 && n >= ls.c.PoolSize:
+		err = ErrPoolFull
+	default:
+		p.pendingLeaves = append(p.pendingLeaves, leaf)
 	}
-	p.pendingLeaves = append(p.pendingLeaves, leaf)
-	return func(ctx context.Context) (SequencedEntry, error) {
-		select {
-		case <-ctx.Done():
-			return SequencedEntry{}, acmeerrors.Internal("context canceled while waiting for sequencing: %w", ctx.Err())
-		case <-p.done:
-			if err := ctx.Err(); err != nil {
-				return SequencedEntry{}, acmeerrors.Internal("context canceled while waiting for sequencing: %w", ctx.Err())
-			}
-			if p.err != nil {
-				return SequencedEntry{}, p.err
-			}
-			idx := p.firstLeafIndex + int64(n)
-			var st *SignedSubtree
-			for _, st = range p.subtrees {
-				if st.Start <= idx && idx < st.End {
-					break
-				}
-			}
-			proof, err := torchwood.ProveRecordInSubtree(st.Start, st.End, idx, p.issuanceHashes)
-			if err != nil {
-				return SequencedEntry{}, acmeerrors.Internal("couldn't compute inclusion proof for leaf %d: %w", idx, err)
-			}
-			return SequencedEntry{Index: idx, Leaf: leaf, Subtree: st, Proof: proof}, nil
+	ls.poolMu.Unlock()
+	<-ls.poolGate
+	if err != nil {
+		return SequencedEntry{}, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return SequencedEntry{}, acmeerrors.Internal("context canceled while waiting for sequencing: %w", ctx.Err())
+	case <-p.done:
+	}
+	if p.err != nil {
+		return SequencedEntry{}, p.err
+	}
+	idx := p.firstLeafIndex + int64(n)
+	var st *SignedSubtree
+	for _, st = range p.subtrees {
+		if st.Start <= idx && idx < st.End {
+			break
 		}
 	}
+	proof, err := torchwood.ProveRecordInSubtree(st.Start, st.End, idx, p.issuanceHashes)
+	if err != nil {
+		return SequencedEntry{}, acmeerrors.Internal("couldn't compute inclusion proof for leaf %d: %w", idx, err)
+	}
+	return SequencedEntry{Index: idx, Leaf: leaf, Subtree: st, Proof: proof}, nil
+}
+
+func checkLeaf(leaf *PendingLogEntry) error {
+	if len(leaf.IssuanceLeaf) > maxLeafSize || len(leaf.EvidenceLeaf) > maxLeafSize {
+		return acmeerrors.Internal("leaf too large: issuance %d, evidence %d", len(leaf.IssuanceLeaf), len(leaf.EvidenceLeaf))
+	}
+	if len(leaf.IssuanceLeaf) == 0 || len(leaf.EvidenceLeaf) == 0 {
+		return acmeerrors.Internal("leaf cannot be empty: issuance %d, evidence %d", len(leaf.IssuanceLeaf), len(leaf.EvidenceLeaf))
+	}
+	return nil
 }
 
 func (ls *Logs) RunSequencer(ctx context.Context, period time.Duration) (err error) {

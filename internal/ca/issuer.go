@@ -185,8 +185,7 @@ func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []s
 		return 0, acmeerrors.New("rejectedIdentifier", 400, "couldn't build log entry: %w", err)
 	}
 
-	wait := iss.logs.AddLeaf(ctx, &lockstep.PendingLogEntry{IssuanceLeaf: entry, EvidenceLeaf: evidence})
-	se, err := wait(ctx)
+	se, err := iss.logs.AddLeaf(ctx, &lockstep.PendingLogEntry{IssuanceLeaf: entry, EvidenceLeaf: evidence})
 	if errors.Is(err, lockstep.ErrPoolFull) {
 		return 0, lockstep.ErrPoolFull
 	}

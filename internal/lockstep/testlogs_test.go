@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"filippo.io/torchwood"
@@ -40,10 +41,9 @@ type TestLogs struct {
 	t      testing.TB
 	l      *slog.LevelVar
 
-	// sequenced records the entries acknowledged by the AddLeaf wait
-	// functions, by index, so that CheckLog can verify that every acknowledged
-	// entry is published at that index in both logs. It is shared across
-	// reloads.
+	// sequenced records the entries acknowledged by AddLeaf, by index, so
+	// that CheckLog can verify that every acknowledged entry is published at
+	// that index in both logs. It is shared across reloads.
 	sequenced *sequencedEntries
 }
 
@@ -541,42 +541,31 @@ func (tl *TestLogs) StartSequencer() {
 	}()
 }
 
-func waitFuncWrapper(t testing.TB, tl *TestLogs, e *lockstep.PendingLogEntry, expectSuccess bool,
-	f lockstep.WaitEntryFunc,
-) lockstep.WaitEntryFunc {
+// checkEntry checks the result of AddLeaf for e, and if it succeeded, records
+// the entry for CheckLog.
+func (tl *TestLogs) checkEntry(t testing.TB, e *lockstep.PendingLogEntry, expectSuccess bool,
+	se lockstep.SequencedEntry, err error) {
 	t.Helper()
-	var called bool
-	fw := func(ctx context.Context) (lockstep.SequencedEntry, error) {
-		t.Helper()
-		called = true
-		se, err := f(ctx)
-		if !expectSuccess {
-			if err == nil {
-				t.Error("expected an error")
-			}
-		} else if err != nil {
-			t.Error(err)
-		} else {
-			if se.Leaf != e {
-				t.Error("SequencedEntry.Leaf is not the submitted entry")
-			}
-			tl.checkSubtree(se)
-			tl.sequenced.mu.Lock()
-			if prev, ok := tl.sequenced.m[se.Index]; ok && prev != e {
-				t.Errorf("index %d was assigned to two different entries", se.Index)
-			}
-			tl.sequenced.m[se.Index] = e
-			tl.sequenced.mu.Unlock()
+	if !expectSuccess {
+		if err == nil {
+			t.Error("expected an error")
 		}
-		return se, err
+		return
 	}
-	t.Cleanup(func() {
-		t.Helper()
-		if !called {
-			fw(context.Background())
-		}
-	})
-	return fw
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if se.Leaf != e {
+		t.Error("SequencedEntry.Leaf is not the submitted entry")
+	}
+	tl.checkSubtree(se)
+	tl.sequenced.mu.Lock()
+	defer tl.sequenced.mu.Unlock()
+	if prev, ok := tl.sequenced.m[se.Index]; ok && prev != e {
+		t.Errorf("index %d was assigned to two different entries", se.Index)
+	}
+	tl.sequenced.m[se.Index] = e
 }
 
 // checkSubtree verifies that se is included in its signed subtree, which is
@@ -640,28 +629,63 @@ func testPaddedEntry(seed uint64) *lockstep.PendingLogEntry {
 	return e
 }
 
-func addEntry(t testing.TB, tl *TestLogs) lockstep.WaitEntryFunc {
+// addEntry is like addEntryWithSeed, with a random seed.
+func addEntry(t testing.TB, tl *TestLogs) func() (lockstep.SequencedEntry, error) {
 	t.Helper()
 	return addEntryWithSeed(t, tl, mathrand.Uint64())
 }
 
-func addEntryWithSeed(t testing.TB, tl *TestLogs, seed uint64) lockstep.WaitEntryFunc {
+// addEntryWithSeed submits testEntry(seed), expecting it to be sequenced.
+// See [TestLogs.submit].
+func addEntryWithSeed(t testing.TB, tl *TestLogs, seed uint64) func() (lockstep.SequencedEntry, error) {
 	t.Helper()
-	e := testEntry(seed)
-	f := tl.Logs.AddLeaf(context.Background(), e)
-	return waitFuncWrapper(t, tl, e, true, f)
+	return tl.submit(t, testEntry(seed), true)
 }
 
-func addEntryExpectFailure(t testing.TB, tl *TestLogs) lockstep.WaitEntryFunc {
+// addEntryExpectFailure is like addEntryExpectFailureWithSeed, with a random
+// seed.
+func addEntryExpectFailure(t testing.TB, tl *TestLogs) func() (lockstep.SequencedEntry, error) {
 	t.Helper()
 	return addEntryExpectFailureWithSeed(t, tl, mathrand.Uint64())
 }
 
-func addEntryExpectFailureWithSeed(t testing.TB, tl *TestLogs, seed uint64) lockstep.WaitEntryFunc {
+// addEntryExpectFailureWithSeed submits testEntry(seed), expecting AddLeaf to
+// fail. See [TestLogs.submit].
+func addEntryExpectFailureWithSeed(t testing.TB, tl *TestLogs, seed uint64) func() (lockstep.SequencedEntry, error) {
 	t.Helper()
-	e := testEntry(seed)
-	f := tl.Logs.AddLeaf(context.Background(), e)
-	return waitFuncWrapper(t, tl, e, false, f)
+	return tl.submit(t, testEntry(seed), false)
+}
+
+// submit calls AddLeaf for e in the background, and returns once AddLeaf is
+// waiting for the pool to be sequenced, or has failed, so that the next
+// Sequence call includes e. It must be called in a synctest bubble.
+//
+// The returned function waits for AddLeaf to return, and checks its result
+// with checkEntry. If the test doesn't call it, it's called at cleanup.
+func (tl *TestLogs) submit(t testing.TB, e *lockstep.PendingLogEntry, expectSuccess bool) func() (lockstep.SequencedEntry, error) {
+	t.Helper()
+	type result struct {
+		se  lockstep.SequencedEntry
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		se, err := tl.Logs.AddLeaf(context.Background(), e)
+		done <- result{se, err}
+	}()
+	synctest.Wait()
+	var r *result
+	wait := func() (lockstep.SequencedEntry, error) {
+		t.Helper()
+		if r == nil {
+			res := <-done
+			r = &res
+			tl.checkEntry(t, e, expectSuccess, r.se, r.err)
+		}
+		return r.se, r.err
+	}
+	t.Cleanup(func() { wait() })
+	return wait
 }
 
 type tileReader struct {

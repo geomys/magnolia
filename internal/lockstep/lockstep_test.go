@@ -28,31 +28,33 @@ import (
 var longFlag = flag.Bool("long", false, "run especially slow tests")
 
 func TestSequenceOneLeaf(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
 
-	n := int64(tileWidth + 2)
-	if *longFlag {
-		n *= tileWidth
-	}
-	if testing.Short() {
-		n = 3
-	} else {
-		tl.Quiet()
-	}
-	for i := int64(0); i < n; i++ {
-		wait := addEntry(t, tl)
-		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-		if e, err := wait(context.Background()); err != nil {
-			t.Fatal(err)
-		} else if e.Index != i {
-			t.Errorf("got leaf index %d, expected %d", e.Index, i)
+		n := int64(tileWidth + 2)
+		if *longFlag {
+			n *= tileWidth
 		}
+		if testing.Short() {
+			n = 3
+		} else {
+			tl.Quiet()
+		}
+		for i := int64(0); i < n; i++ {
+			wait := addEntry(t, tl)
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			if e, err := wait(); err != nil {
+				t.Fatal(err)
+			} else if e.Index != i {
+				t.Errorf("got leaf index %d, expected %d", e.Index, i)
+			}
 
-		if !*longFlag {
-			tl.CheckLog(i + 1)
+			if !*longFlag {
+				tl.CheckLog(i + 1)
+			}
 		}
-	}
-	tl.CheckLog(n)
+		tl.CheckLog(n)
+	})
 }
 
 func TestSequenceLargeLog(t *testing.T) {
@@ -75,8 +77,9 @@ func TestSequenceLargeLog(t *testing.T) {
 
 		for i := 0; i < 500; i++ {
 			for k := 0; k < 3000; k++ {
-				tl.Logs.AddLeaf(context.Background(), testEntry(uint64(i*3000+k)))
+				go tl.Logs.AddLeaf(context.Background(), testEntry(uint64(i*3000+k)))
 			}
+			synctest.Wait()
 			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 		}
 		tl.CheckLog(5 + 500*3000)
@@ -84,117 +87,123 @@ func TestSequenceLargeLog(t *testing.T) {
 }
 
 func TestSequenceEmptyPool(t *testing.T) {
-	sequenceTwice := func(tl *TestLogs, size int64) {
-		t.Helper()
-		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-		tl.CheckLog(size)
-		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-		if published := tl.CheckLog(size); published != [2]int64{size, size} {
-			t.Errorf("published sizes %v, expected %d", published, size)
+	synctest.Test(t, func(t *testing.T) {
+		sequenceTwice := func(tl *TestLogs, size int64) {
+			t.Helper()
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			tl.CheckLog(size)
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			if published := tl.CheckLog(size); published != [2]int64{size, size} {
+				t.Errorf("published sizes %v, expected %d", published, size)
+			}
 		}
-	}
-	addEntries := func(tl *TestLogs, n int) {
-		for i := 0; i < n; i++ {
-			addEntry(t, tl)
+		addEntries := func(tl *TestLogs, n int) {
+			for i := 0; i < n; i++ {
+				addEntry(t, tl)
+			}
 		}
-	}
 
-	tl := NewEmptyTestLogs(t)
-	sequenceTwice(tl, 0)
-	addEntries(tl, 5)
-	sequenceTwice(tl, 5)
-	addEntries(tl, tileWidth-5-1)
-	sequenceTwice(tl, tileWidth-1)
-	addEntries(tl, 1)
-	sequenceTwice(tl, tileWidth)
-	addEntries(tl, 1)
-	sequenceTwice(tl, tileWidth+1)
+		tl := NewEmptyTestLogs(t)
+		sequenceTwice(tl, 0)
+		addEntries(tl, 5)
+		sequenceTwice(tl, 5)
+		addEntries(tl, tileWidth-5-1)
+		sequenceTwice(tl, tileWidth-1)
+		addEntries(tl, 1)
+		sequenceTwice(tl, tileWidth)
+		addEntries(tl, 1)
+		sequenceTwice(tl, tileWidth+1)
+	})
 }
 
 // TestSequenceSubtrees verifies that each pool is covered by one or two signed
 // subtrees, passed once to SubtreesSigned and shared by the entries they cover.
 // The entries themselves are checked against their subtrees by checkSubtree.
 func TestSequenceSubtrees(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	var size int64
-	for _, n := range []int64{1, 2, 5, 0, tileWidth + 3, 1, 2} {
-		var waits []lockstep.WaitEntryFunc
-		for range n {
-			waits = append(waits, addEntry(t, tl))
-		}
-		calls := len(tl.Config.Subtrees.Calls())
-		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-		size += n
-		tl.CheckLog(size)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		var size int64
+		for _, n := range []int64{1, 2, 5, 0, tileWidth + 3, 1, 2} {
+			var waits []func() (lockstep.SequencedEntry, error)
+			for range n {
+				waits = append(waits, addEntry(t, tl))
+			}
+			calls := len(tl.Config.Subtrees.Calls())
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			size += n
+			tl.CheckLog(size)
 
-		newCalls := tl.Config.Subtrees.Calls()[calls:]
-		if n == 0 {
-			if len(newCalls) != 0 {
-				t.Errorf("empty pool: SubtreesSigned called %d times", len(newCalls))
+			newCalls := tl.Config.Subtrees.Calls()[calls:]
+			if n == 0 {
+				if len(newCalls) != 0 {
+					t.Errorf("empty pool: SubtreesSigned called %d times", len(newCalls))
+				}
+				continue
 			}
-			continue
-		}
-		if len(newCalls) != 1 {
-			t.Fatalf("pool of %d: SubtreesSigned called %d times, expected once", n, len(newCalls))
-		}
-		subtrees := newCalls[0]
-		if expected := min(n, 2); int64(len(subtrees)) != expected {
-			t.Errorf("pool of %d: got %d subtrees, expected %d", n, len(subtrees), expected)
-		}
-		if subtrees[len(subtrees)-1].End != size {
-			t.Errorf("pool of %d: last subtree ends at %d, expected %d", n, subtrees[len(subtrees)-1].End, size)
-		}
-		for _, wait := range waits {
-			e, err := wait(t.Context())
-			fatalIfErr(t, err)
-			if !slices.Contains(subtrees, e.Subtree) {
-				t.Errorf("entry %d has subtree [%d, %d) from another pool", e.Index, e.Subtree.Start, e.Subtree.End)
+			if len(newCalls) != 1 {
+				t.Fatalf("pool of %d: SubtreesSigned called %d times, expected once", n, len(newCalls))
+			}
+			subtrees := newCalls[0]
+			if expected := min(n, 2); int64(len(subtrees)) != expected {
+				t.Errorf("pool of %d: got %d subtrees, expected %d", n, len(subtrees), expected)
+			}
+			if subtrees[len(subtrees)-1].End != size {
+				t.Errorf("pool of %d: last subtree ends at %d, expected %d", n, subtrees[len(subtrees)-1].End, size)
+			}
+			for _, wait := range waits {
+				e, err := wait()
+				fatalIfErr(t, err)
+				if !slices.Contains(subtrees, e.Subtree) {
+					t.Errorf("entry %d has subtree [%d, %d) from another pool", e.Index, e.Subtree.Start, e.Subtree.End)
+				}
 			}
 		}
-	}
+	})
 }
 
 func TestSequenceUploadCount(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	for i := 0; i < tileWidth+1; i++ {
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		for i := 0; i < tileWidth+1; i++ {
+			addEntry(t, tl)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+
+		var old uint64
+		uploads := func() uint64 {
+			new := tl.Config.Backend.(*MemoryBackend).uploads.Load()
+			n := new - old
+			old = new
+			return n
+		}
+		uploads()
+
+		// Empty rounds should cause only two uploads: the two checkpoints.
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		if n := uploads(); n != 2 {
+			t.Errorf("got %d uploads, expected 2", n)
+		}
+
+		// One entry in steady state (not at tile boundary) should cause seven
+		// uploads: the staging bundle, the two checkpoints, and for each log the
+		// tiles at levels 0 and -1.
 		addEntry(t, tl)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		if n := uploads(); n != 7 {
+			t.Errorf("got %d uploads, expected 7", n)
+		}
 
-	var old uint64
-	uploads := func() uint64 {
-		new := tl.Config.Backend.(*MemoryBackend).uploads.Load()
-		n := new - old
-		old = new
-		return n
-	}
-	uploads()
-
-	// Empty rounds should cause only two uploads: the two checkpoints.
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	if n := uploads(); n != 2 {
-		t.Errorf("got %d uploads, expected 2", n)
-	}
-
-	// One entry in steady state (not at tile boundary) should cause seven
-	// uploads: the staging bundle, the two checkpoints, and for each log the
-	// tiles at levels 0 and -1.
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	if n := uploads(); n != 7 {
-		t.Errorf("got %d uploads, expected 7", n)
-	}
-
-	// A tile width worth of entries should cause thirteen uploads: the staging
-	// bundle, the two checkpoints, and for each log two level -1 tiles, two
-	// level 0 tiles, and one level 1 tile.
-	for i := 0; i < tileWidth; i++ {
-		addEntry(t, tl)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	if n := uploads(); n != 13 {
-		t.Errorf("got %d uploads, expected 13", n)
-	}
+		// A tile width worth of entries should cause thirteen uploads: the staging
+		// bundle, the two checkpoints, and for each log two level -1 tiles, two
+		// level 0 tiles, and one level 1 tile.
+		for i := 0; i < tileWidth; i++ {
+			addEntry(t, tl)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		if n := uploads(); n != 13 {
+			t.Errorf("got %d uploads, expected 13", n)
+		}
+	})
 }
 
 // stagingPath returns the path of the staging bundle for the current lock
@@ -207,169 +216,173 @@ func stagingPath(t *testing.T, tl *TestLogs) string {
 }
 
 func TestSequenceUploadPaths(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
 
-	for i := uint64(0); i < tileWidth+5; i++ {
-		addEntryWithSeed(t, tl, i)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	staging1 := stagingPath(t, tl)
-	for i := uint64(0); i < tileWidth+10; i++ {
-		addEntryWithSeed(t, tl, 1000+i)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	staging2 := stagingPath(t, tl)
-	tl.CheckLog(2*tileWidth + 15)
-
-	m := tl.Config.Backend.(*MemoryBackend).m
-	keys := slices.Sorted(maps.Keys(m))
-
-	expected := []string{staging1, staging2}
-	for _, prefix := range []string{"issuance/", "evidence/"} {
-		for _, suffix := range []string{
-			"checkpoint",
-			"tile/0/000",
-			"tile/0/001",
-			"tile/0/001.p/5",
-			"tile/0/002.p/15",
-			"tile/1/000.p/1",
-			"tile/1/000.p/2",
-			"tile/entries/000",
-			"tile/entries/001",
-			"tile/entries/001.p/5",
-			"tile/entries/002.p/15",
-		} {
-			expected = append(expected, prefix+suffix)
+		for i := uint64(0); i < tileWidth+5; i++ {
+			addEntryWithSeed(t, tl, i)
 		}
-	}
-	slices.Sort(expected)
-	if !slices.Equal(keys, expected) {
-		t.Errorf("got %#v, expected %#v", keys, expected)
-	}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		staging1 := stagingPath(t, tl)
+		for i := uint64(0); i < tileWidth+10; i++ {
+			addEntryWithSeed(t, tl, 1000+i)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		staging2 := stagingPath(t, tl)
+		tl.CheckLog(2*tileWidth + 15)
 
-	for _, key := range keys {
-		expectedImmutable := !strings.HasSuffix(key, "/checkpoint") && !strings.HasPrefix(key, "staging/")
-		expectedDeleted := strings.HasPrefix(key, "staging/")
-		if tl.Config.Backend.(*MemoryBackend).del[key] != expectedDeleted {
-			t.Errorf("got deleted %v, expected %v for key %q", tl.Config.Backend.(*MemoryBackend).del[key], expectedDeleted, key)
+		m := tl.Config.Backend.(*MemoryBackend).m
+		keys := slices.Sorted(maps.Keys(m))
+
+		expected := []string{staging1, staging2}
+		for _, prefix := range []string{"issuance/", "evidence/"} {
+			for _, suffix := range []string{
+				"checkpoint",
+				"tile/0/000",
+				"tile/0/001",
+				"tile/0/001.p/5",
+				"tile/0/002.p/15",
+				"tile/1/000.p/1",
+				"tile/1/000.p/2",
+				"tile/entries/000",
+				"tile/entries/001",
+				"tile/entries/001.p/5",
+				"tile/entries/002.p/15",
+			} {
+				expected = append(expected, prefix+suffix)
+			}
 		}
-		if tl.Config.Backend.(*MemoryBackend).imm[key] != expectedImmutable {
-			t.Errorf("got immutable %v, expected %v for key %q", tl.Config.Backend.(*MemoryBackend).imm[key], expectedImmutable, key)
+		slices.Sort(expected)
+		if !slices.Equal(keys, expected) {
+			t.Errorf("got %#v, expected %#v", keys, expected)
 		}
-	}
+
+		for _, key := range keys {
+			expectedImmutable := !strings.HasSuffix(key, "/checkpoint") && !strings.HasPrefix(key, "staging/")
+			expectedDeleted := strings.HasPrefix(key, "staging/")
+			if tl.Config.Backend.(*MemoryBackend).del[key] != expectedDeleted {
+				t.Errorf("got deleted %v, expected %v for key %q", tl.Config.Backend.(*MemoryBackend).del[key], expectedDeleted, key)
+			}
+			if tl.Config.Backend.(*MemoryBackend).imm[key] != expectedImmutable {
+				t.Errorf("got immutable %v, expected %v for key %q", tl.Config.Backend.(*MemoryBackend).imm[key], expectedImmutable, key)
+			}
+		}
+	})
 }
 
 func TestPoolFull(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	tl.Config.PoolSize = 10
-	tl = ReloadLogs(t, tl)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		tl.Config.PoolSize = 10
+		tl = ReloadLogs(t, tl)
 
-	for range 10 {
-		addEntry(t, tl)
-	}
-	for range 10 {
-		wait := addEntryExpectFailure(t, tl)
-		if _, err := wait(t.Context()); !errors.Is(err, lockstep.ErrPoolFull) {
-			t.Errorf("got error %v, expected ErrPoolFull", err)
-		} else if e, ok := errors.AsType[acmeerrors.Error](err); !ok || e.Status() != 503 {
-			t.Errorf("got error %v, expected a 503 problem", err)
+		for range 10 {
+			addEntry(t, tl)
 		}
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(10)
+		for range 10 {
+			wait := addEntryExpectFailure(t, tl)
+			if _, err := wait(); !errors.Is(err, lockstep.ErrPoolFull) {
+				t.Errorf("got error %v, expected ErrPoolFull", err)
+			} else if e, ok := errors.AsType[acmeerrors.Error](err); !ok || e.Status() != 503 {
+				t.Errorf("got error %v, expected a 503 problem", err)
+			}
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(10)
 
-	// The next pool accepts entries again.
-	for range 10 {
-		addEntry(t, tl)
-	}
-	addEntryExpectFailure(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(20)
+		// The next pool accepts entries again.
+		for range 10 {
+			addEntry(t, tl)
+		}
+		addEntryExpectFailure(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(20)
+	})
 }
 
 func TestCanceledSubmissions(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
 
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	// A canceled submission is dropped without making it into the pool.
-	wait := tl.Logs.AddLeaf(canceled, testEntry(0))
-	if _, err := wait(context.Background()); !errors.Is(err, context.Canceled) {
-		t.Errorf("got error %v, expected context.Canceled", err)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(0)
-
-	// A sequenced entry is not served to a client that went away, but the
-	// entry is in the log regardless.
-	wait = tl.Logs.AddLeaf(context.Background(), testEntry(0))
-	if _, err := wait(canceled); !errors.Is(err, context.Canceled) {
-		t.Errorf("got error %v, expected context.Canceled", err)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	// Both the context and the pool are done, and select picks one at random.
-	for range 20 {
-		if _, err := wait(canceled); !errors.Is(err, context.Canceled) {
+		// A canceled submission is dropped without making it into the pool.
+		if _, err := tl.Logs.AddLeaf(canceled, testEntry(0)); !errors.Is(err, context.Canceled) {
 			t.Errorf("got error %v, expected context.Canceled", err)
 		}
-	}
-	if e, err := wait(context.Background()); err != nil {
-		t.Errorf("got error %v, expected sequenced entry", err)
-	} else if e.Index != 0 {
-		t.Errorf("got index %d, expected 0", e.Index)
-	}
-	tl.CheckLog(1)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(0)
+
+		// A submission canceled while waiting for sequencing returns an error,
+		// but the entry is in the log regardless.
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := tl.Logs.AddLeaf(ctx, testEntry(0))
+			done <- err
+		}()
+		synctest.Wait()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("got error %v, expected context.Canceled", err)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(1)
+	})
 }
 
 func TestLeafValidation(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
 
-	big := bytes.Repeat([]byte("A"), 65536)
-	ok := bytes.Repeat([]byte("B"), 65535)
-	for _, e := range []*lockstep.PendingLogEntry{
-		{IssuanceLeaf: nil, EvidenceLeaf: ok},
-		{IssuanceLeaf: ok, EvidenceLeaf: nil},
-		{IssuanceLeaf: nil, EvidenceLeaf: nil},
-		{IssuanceLeaf: big, EvidenceLeaf: ok},
-		{IssuanceLeaf: ok, EvidenceLeaf: big},
-	} {
-		wait := tl.Logs.AddLeaf(t.Context(), e)
-		if _, err := wait(t.Context()); err == nil {
-			t.Errorf("entry with leaves of size %d and %d was accepted", len(e.IssuanceLeaf), len(e.EvidenceLeaf))
+		big := bytes.Repeat([]byte("A"), 65536)
+		ok := bytes.Repeat([]byte("B"), 65535)
+		for _, e := range []*lockstep.PendingLogEntry{
+			{IssuanceLeaf: nil, EvidenceLeaf: ok},
+			{IssuanceLeaf: ok, EvidenceLeaf: nil},
+			{IssuanceLeaf: nil, EvidenceLeaf: nil},
+			{IssuanceLeaf: big, EvidenceLeaf: ok},
+			{IssuanceLeaf: ok, EvidenceLeaf: big},
+		} {
+			if _, err := tl.Logs.AddLeaf(t.Context(), e); err == nil {
+				t.Errorf("entry with leaves of size %d and %d was accepted", len(e.IssuanceLeaf), len(e.EvidenceLeaf))
+			}
 		}
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(0)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(0)
 
-	// The maximum size is accepted.
-	e := &lockstep.PendingLogEntry{IssuanceLeaf: ok, EvidenceLeaf: ok}
-	wait := waitFuncWrapper(t, tl, e, true, tl.Logs.AddLeaf(t.Context(), e))
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	wait(t.Context())
-	tl.CheckLog(1)
-	tl = ReloadLogs(t, tl)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2)
+		// The maximum size is accepted.
+		e := &lockstep.PendingLogEntry{IssuanceLeaf: ok, EvidenceLeaf: ok}
+		wait := tl.submit(t, e, true)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		wait()
+		tl.CheckLog(1)
+		tl = ReloadLogs(t, tl)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2)
+	})
 }
 
 // TestMaxSizeDataTile verifies that a full data tile of maximum size leaves,
 // which compresses extremely well, can be loaded.
 func TestMaxSizeDataTile(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	tl.Quiet()
-	for i := range tileWidth {
-		leaf := bytes.Repeat([]byte{byte(i)}, 65535)
-		e := &lockstep.PendingLogEntry{IssuanceLeaf: leaf, EvidenceLeaf: leaf}
-		waitFuncWrapper(t, tl, e, true, tl.Logs.AddLeaf(t.Context(), e))
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(tileWidth)
-	tl = ReloadLogs(t, tl)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(tileWidth + 1)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		tl.Quiet()
+		for i := range tileWidth {
+			leaf := bytes.Repeat([]byte{byte(i)}, 65535)
+			e := &lockstep.PendingLogEntry{IssuanceLeaf: leaf, EvidenceLeaf: leaf}
+			tl.submit(t, e, true)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(tileWidth)
+		tl = ReloadLogs(t, tl)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(tileWidth + 1)
+	})
 }
 
 // TestConcurrentSubmissions verifies that entries submitted concurrently while
@@ -385,13 +398,12 @@ func TestConcurrentSubmissions(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range submitters {
 		wg.Go(func() {
-			wait := addEntryWithSeed(t, tl, uint64(i))
-			e, err := wait(t.Context())
-			if err != nil {
-				t.Error(err)
-				return
+			e := testEntry(uint64(i))
+			se, err := tl.Logs.AddLeaf(t.Context(), e)
+			tl.checkEntry(t, e, true, se, err)
+			if err == nil {
+				indexes <- se.Index
 			}
-			indexes <- e.Index
 		})
 	}
 	wg.Wait()
@@ -446,7 +458,9 @@ func TestSequencerNotStarved(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range submitters {
 		wg.Go(func() {
-			tl.Logs.AddLeaf(context.Background(), testEntry(uint64(i)))
+			if _, err := tl.Logs.AddLeaf(context.Background(), testEntry(uint64(i))); err != nil {
+				t.Error(err)
+			}
 		})
 	}
 
@@ -477,227 +491,218 @@ func TestSequencerNotStarved(t *testing.T) {
 		t.Errorf("sequencer waited for %d submissions, expected at most a few", releasedBeforeSwap)
 	}
 
-	// Release the rest of the queue and wait for the round to complete.
-	allDone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(allDone)
-	}()
-	for draining := true; draining; {
-		select {
-		case release := <-pauses:
-			close(release)
-		case <-allDone:
-			draining = false
-		}
+	// Release the rest of the queue, and sequence the pool it went into.
+	for range submitters - 1 - releasedBeforeSwap {
+		close(<-pauses)
 	}
 	fatalIfErr(t, <-seqDone)
+	fatalIfErr(t, tl.Logs.Sequence(context.Background()))
+	wg.Wait()
 }
 
 // TestPoolGateCancel verifies that a submission waiting for the pool lock
 // keeps waiting until the lock is released, unless its context is canceled.
 func TestPoolGateCancel(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
 
-	pauses := make(chan chan struct{})
-	lockstep.SetAddLeafPause(func() {
-		release := make(chan struct{})
-		pauses <- release
-		<-release
+		pauses := make(chan chan struct{})
+		lockstep.SetAddLeafPause(func() {
+			release := make(chan struct{})
+			pauses <- release
+			<-release
+		})
+		t.Cleanup(func() { lockstep.SetAddLeafPause(nil) })
+
+		addEntry(t, tl)
+		holder := <-pauses
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := tl.Logs.AddLeaf(ctx, testEntry(1))
+			done <- err
+		}()
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("submission returned instead of waiting for the pool lock")
+		default:
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("got error %v, expected context.Canceled", err)
+		}
+
+		close(holder)
+		lockstep.SetAddLeafPause(nil)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2)
 	})
-	t.Cleanup(func() { lockstep.SetAddLeafPause(nil) })
-
-	go tl.Logs.AddLeaf(context.Background(), testEntry(0))
-	holder := <-pauses
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan lockstep.WaitEntryFunc, 1)
-	go func() {
-		done <- tl.Logs.AddLeaf(ctx, testEntry(1))
-	}()
-	select {
-	case <-done:
-		t.Fatal("submission returned instead of waiting for the pool lock")
-	case <-time.After(200 * time.Millisecond):
-	}
-	cancel()
-	wait := <-done
-	if _, err := wait(context.Background()); !errors.Is(err, context.Canceled) {
-		t.Errorf("got error %v, expected context.Canceled", err)
-	}
-
-	close(holder)
-	lockstep.SetAddLeafPause(nil)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2)
 }
 
 // TestSubmissionDuringSequencing verifies that entries submitted while a pool
 // is being sequenced go to the next pool, and are sequenced right after it.
 func TestSubmissionDuringSequencing(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	wait0 := addEntry(t, tl)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		wait0 := addEntry(t, tl)
 
-	swapped := make(chan struct{}, 1)
-	lockstep.SetPoolSwapCallback(func() {
+		swapped := make(chan struct{}, 1)
+		lockstep.SetPoolSwapCallback(func() {
+			select {
+			case swapped <- struct{}{}:
+			default:
+			}
+		})
+		t.Cleanup(func() { lockstep.SetPoolSwapCallback(nil) })
+		lockstep.PauseSequencer(t)
+
+		seqDone := make(chan error, 1)
+		go func() { seqDone <- tl.Logs.Sequence(context.Background()) }()
+		<-swapped
+		wait1 := addEntry(t, tl)
 		select {
-		case swapped <- struct{}{}:
+		case <-seqDone:
+			t.Fatal("sequencing completed while paused")
 		default:
 		}
+		lockstep.ResumeSequencer()
+		fatalIfErr(t, <-seqDone)
+
+		if e, err := wait0(); err != nil {
+			t.Fatal(err)
+		} else if e.Index != 0 {
+			t.Errorf("got index %d, expected 0", e.Index)
+		}
+		tl.CheckLog(1)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		if e, err := wait1(); err != nil {
+			t.Fatal(err)
+		} else if e.Index != 1 {
+			t.Errorf("got index %d, expected 1", e.Index)
+		}
+		tl.CheckLog(2)
 	})
-	t.Cleanup(func() { lockstep.SetPoolSwapCallback(nil) })
-	lockstep.PauseSequencer()
-
-	seqDone := make(chan error, 1)
-	go func() { seqDone <- tl.Logs.Sequence(context.Background()) }()
-	<-swapped
-	wait1 := addEntry(t, tl)
-	select {
-	case <-seqDone:
-		t.Fatal("sequencing completed while paused")
-	default:
-	}
-	lockstep.ResumeSequencer()
-	fatalIfErr(t, <-seqDone)
-
-	if e, err := wait0(t.Context()); err != nil {
-		t.Fatal(err)
-	} else if e.Index != 0 {
-		t.Errorf("got index %d, expected 0", e.Index)
-	}
-	tl.CheckLog(1)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	if e, err := wait1(t.Context()); err != nil {
-		t.Fatal(err)
-	} else if e.Index != 1 {
-		t.Errorf("got index %d, expected 1", e.Index)
-	}
-	tl.CheckLog(2)
 }
 
 // TestWaitDuringSequencing verifies that entries can be collected while the
 // next pool is being sequenced, which replaces the edge tiles their inclusion
 // proofs are computed from.
 func TestWaitDuringSequencing(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	for range 5 {
-		addEntry(t, tl)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		for range 5 {
+			addEntry(t, tl)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 
-	// The left covering subtree of this pool starts before it, so the proofs
-	// need hashes from the edge tiles of the previous tree.
-	var entries []*lockstep.PendingLogEntry
-	var waits []lockstep.WaitEntryFunc
-	for i := range tileWidth {
-		e := testEntry(uint64(i))
-		entries = append(entries, e)
-		waits = append(waits, tl.Logs.AddLeaf(t.Context(), e))
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	for range tileWidth {
-		addEntry(t, tl)
-	}
+		// The left covering subtree of this pool starts before it, so the proofs
+		// need hashes from the edge tiles of the previous tree.
+		var waits []func() (lockstep.SequencedEntry, error)
+		for range tileWidth {
+			waits = append(waits, addEntry(t, tl))
+		}
 
-	// The wait functions are called without going through waitFuncWrapper,
-	// and without logging, because the testing.T methods synchronize the
-	// goroutines, which would hide data races from the race detector.
-	tl.Quiet()
-	type result struct {
-		e   lockstep.SequencedEntry
-		err error
-	}
-	results := make([]result, len(waits))
-	var wg sync.WaitGroup
-	for i, wait := range waits {
-		wg.Go(func() {
-			e, err := wait(context.Background())
-			results[i] = result{e, err}
-		})
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	wg.Wait()
+		// Fill the next pool while this one is being sequenced, and sequence it
+		// right away, while the AddLeaf calls for this pool are computing their
+		// proofs. Logging is off, because the testing.T methods synchronize the
+		// goroutines, which would hide data races from the race detector.
+		tl.Quiet()
+		lockstep.PauseSequencer(t)
+		seqDone := make(chan error, 1)
+		go func() { seqDone <- tl.Logs.Sequence(context.Background()) }()
+		synctest.Wait()
+		for range tileWidth {
+			addEntry(t, tl)
+		}
+		lockstep.ResumeSequencer()
+		fatalIfErr(t, <-seqDone)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 
-	for i, r := range results {
-		wait := func(context.Context) (lockstep.SequencedEntry, error) { return r.e, r.err }
-		waitFuncWrapper(t, tl, entries[i], true, wait)(t.Context())
-	}
-	tl.CheckLog(5 + 2*tileWidth)
+		for _, wait := range waits {
+			wait()
+		}
+		tl.CheckLog(5 + 2*tileWidth)
+	})
 }
 
 func TestReloadLog(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	n := int64(tileWidth + 2)
-	if testing.Short() {
-		n = 3
-	} else {
-		tl.Quiet()
-	}
-	for i := int64(0); i < n; i++ {
-		addEntry(t, tl)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		n := int64(tileWidth + 2)
+		if testing.Short() {
+			n = 3
+		} else {
+			tl.Quiet()
+		}
+		for i := int64(0); i < n; i++ {
+			addEntry(t, tl)
 
-		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-		tl.CheckLog(i + 1)
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			tl.CheckLog(i + 1)
 
-		tl = ReloadLogs(t, tl)
-		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-		tl.CheckLog(i + 1)
-	}
+			tl = ReloadLogs(t, tl)
+			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+			tl.CheckLog(i + 1)
+		}
+	})
 }
 
 func TestReloadWrongConfig(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(1)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(1)
 
-	tests := []struct {
-		name   string
-		mutate func(c *testConfig)
-	}{
-		{"IssuanceOrigin", func(c *testConfig) { c.IssuanceOrigin = "wrong" }},
-		{"EvidenceOrigin", func(c *testConfig) { c.EvidenceOrigin = "wrong" }},
-		{"SwappedOrigins", func(c *testConfig) {
-			c.IssuanceOrigin, c.EvidenceOrigin = c.EvidenceOrigin, c.IssuanceOrigin
-		}},
-		{"IssuanceKey", func(c *testConfig) {
-			c.IssuanceSigners = []*torchwood.CosignatureSigner{newTestSigner(t, c.IssuanceOrigin)}
-		}},
-		{"EvidenceKey", func(c *testConfig) {
-			c.EvidenceSigners = []*torchwood.CosignatureSigner{newTestSigner(t, c.EvidenceOrigin)}
-		}},
-		{"SwappedKeys", func(c *testConfig) {
-			c.IssuanceSigners, c.EvidenceSigners = c.EvidenceSigners, c.IssuanceSigners
-		}},
-		{"SwappedLogs", func(c *testConfig) {
-			c.IssuanceOrigin, c.EvidenceOrigin = c.EvidenceOrigin, c.IssuanceOrigin
-			c.IssuanceSigners, c.EvidenceSigners = c.EvidenceSigners, c.IssuanceSigners
-		}},
-		{"ExtraIssuanceKey", func(c *testConfig) {
-			c.IssuanceSigners = append(slices.Clone(c.IssuanceSigners), newTestSigner(t, c.IssuanceOrigin))
-		}},
-		{"ExtraEvidenceKey", func(c *testConfig) {
-			c.EvidenceSigners = append(slices.Clone(c.EvidenceSigners), newTestSigner(t, c.EvidenceOrigin))
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(c *testConfig)
+		}{
+			{"IssuanceOrigin", func(c *testConfig) { c.IssuanceOrigin = "wrong" }},
+			{"EvidenceOrigin", func(c *testConfig) { c.EvidenceOrigin = "wrong" }},
+			{"SwappedOrigins", func(c *testConfig) {
+				c.IssuanceOrigin, c.EvidenceOrigin = c.EvidenceOrigin, c.IssuanceOrigin
+			}},
+			{"IssuanceKey", func(c *testConfig) {
+				c.IssuanceSigners = []*torchwood.CosignatureSigner{newTestSigner(t, c.IssuanceOrigin)}
+			}},
+			{"EvidenceKey", func(c *testConfig) {
+				c.EvidenceSigners = []*torchwood.CosignatureSigner{newTestSigner(t, c.EvidenceOrigin)}
+			}},
+			{"SwappedKeys", func(c *testConfig) {
+				c.IssuanceSigners, c.EvidenceSigners = c.EvidenceSigners, c.IssuanceSigners
+			}},
+			{"SwappedLogs", func(c *testConfig) {
+				c.IssuanceOrigin, c.EvidenceOrigin = c.EvidenceOrigin, c.IssuanceOrigin
+				c.IssuanceSigners, c.EvidenceSigners = c.EvidenceSigners, c.IssuanceSigners
+			}},
+			{"ExtraIssuanceKey", func(c *testConfig) {
+				c.IssuanceSigners = append(slices.Clone(c.IssuanceSigners), newTestSigner(t, c.IssuanceOrigin))
+			}},
+			{"ExtraEvidenceKey", func(c *testConfig) {
+				c.EvidenceSigners = append(slices.Clone(c.EvidenceSigners), newTestSigner(t, c.EvidenceOrigin))
+			}},
+		}
+		// Subtests can't run inside a synctest bubble.
+		for _, tt := range tests {
 			c := tl.Config
 			tt.mutate(&c)
 			if _, _, err := lockstep.LoadLogs(context.Background(), c.build()); err == nil {
-				t.Error("expected loading to fail")
+				t.Errorf("%s: expected loading to fail", tt.name)
 			} else {
-				t.Logf("LoadLogs: %v", err)
+				t.Logf("%s: LoadLogs: %v", tt.name, err)
 			}
-		})
-	}
+		}
 
-	// The unmodified configuration still loads.
-	tl = ReloadLogs(t, tl)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2)
+		// The unmodified configuration still loads.
+		tl = ReloadLogs(t, tl)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2)
+	})
 }
 
 // TestLoadInconsistentState verifies that LoadLogs refuses to start from
@@ -831,22 +836,24 @@ func TestLoadInconsistentState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tl := NewEmptyTestLogs(t)
-			for range 3 {
-				addEntry(t, tl)
-			}
-			fatalIfErr(t, tl.Logs.Sequence(ctx))
-			tl.CheckLog(3)
+			synctest.Test(t, func(t *testing.T) {
+				tl := NewEmptyTestLogs(t)
+				for range 3 {
+					addEntry(t, tl)
+				}
+				fatalIfErr(t, tl.Logs.Sequence(ctx))
+				tl.CheckLog(3)
 
-			tt.corrupt(t, tl)
-			_, _, err := lockstep.LoadLogs(ctx, tl.Config.build())
-			if err == nil {
-				t.Fatal("expected loading to fail")
-			}
-			t.Logf("LoadLogs: %v", err)
-			if !strings.Contains(err.Error(), tt.wantError) {
-				t.Errorf("got error %q, expected it to contain %q", err, tt.wantError)
-			}
+				tt.corrupt(t, tl)
+				_, _, err := lockstep.LoadLogs(ctx, tl.Config.build())
+				if err == nil {
+					t.Fatal("expected loading to fail")
+				}
+				t.Logf("LoadLogs: %v", err)
+				if !strings.Contains(err.Error(), tt.wantError) {
+					t.Errorf("got error %q, expected it to contain %q", err, tt.wantError)
+				}
+			})
 		})
 	}
 }
@@ -874,27 +881,29 @@ func rewriteDataTile(t *testing.T, tl *TestLogs, key string, f func([]byte) []by
 }
 
 func TestCreateLogsWithFirstEntry(t *testing.T) {
-	config := newTestConfig(t)
-	first := &lockstep.PendingLogEntry{IssuanceLeaf: []byte("first"), EvidenceLeaf: []byte("evidence")}
-	fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build(), first))
+	synctest.Test(t, func(t *testing.T) {
+		config := newTestConfig(t)
+		first := &lockstep.PendingLogEntry{IssuanceLeaf: []byte("first"), EvidenceLeaf: []byte("evidence")}
+		fatalIfErr(t, lockstep.CreateLogs(t.Context(), config.build(), first))
 
-	logs, size, err := lockstep.LoadLogs(t.Context(), config.build())
-	fatalIfErr(t, err)
-	if size != 1 {
-		t.Errorf("LoadLogs returned size %d, want 1", size)
-	}
-	tl := &TestLogs{Logs: logs, Config: config, t: t, l: &slog.LevelVar{},
-		sequenced: &sequencedEntries{m: map[int64]*lockstep.PendingLogEntry{0: first}}}
-	tl.CheckLog(1)
+		logs, size, err := lockstep.LoadLogs(t.Context(), config.build())
+		fatalIfErr(t, err)
+		if size != 1 {
+			t.Errorf("LoadLogs returned size %d, want 1", size)
+		}
+		tl := &TestLogs{Logs: logs, Config: config, t: t, l: &slog.LevelVar{},
+			sequenced: &sequencedEntries{m: map[int64]*lockstep.PendingLogEntry{0: first}}}
+		tl.CheckLog(1)
 
-	wait := addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	se, err := wait(t.Context())
-	fatalIfErr(t, err)
-	if se.Index != 1 {
-		t.Errorf("got index %d after the first entry, want 1", se.Index)
-	}
-	tl.CheckLog(2)
+		wait := addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		se, err := wait()
+		fatalIfErr(t, err)
+		if se.Index != 1 {
+			t.Errorf("got index %d after the first entry, want 1", se.Index)
+		}
+		tl.CheckLog(2)
+	})
 }
 
 func TestCreateLogs(t *testing.T) {
@@ -943,72 +952,74 @@ func TestCreateLogs(t *testing.T) {
 }
 
 func TestStagingCollision(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 
-	// First, upload a staging bundle but fail sequencing.
+		// First, upload a staging bundle but fail sequencing.
 
-	addEntryExpectFailureWithSeed(t, tl, 'A')
-	addEntryExpectFailureWithSeed(t, tl, 'B')
+		addEntryExpectFailureWithSeed(t, tl, 'A')
+		addEntryExpectFailureWithSeed(t, tl, 'B')
 
-	tl.Config.Faults.UpdateCallback = failUpdate(false)
-	sequenceExpectFailure(t, tl)
-	tl.CheckLog(1)
+		tl.Config.Faults.UpdateCallback = failUpdate(false)
+		sequenceExpectFailure(t, tl)
+		tl.CheckLog(1)
 
-	tl.Config.Faults.UpdateCallback = nil
-	tl = ReloadLogs(t, tl)
-	tl.CheckLog(1)
+		tl.Config.Faults.UpdateCallback = nil
+		tl = ReloadLogs(t, tl)
+		tl.CheckLog(1)
 
-	// Then, cause the exact same staging bundle to be uploaded.
+		// Then, cause the exact same staging bundle to be uploaded.
 
-	addEntryWithSeed(t, tl, 'A')
-	addEntryWithSeed(t, tl, 'B')
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(3)
+		addEntryWithSeed(t, tl, 'A')
+		addEntryWithSeed(t, tl, 'B')
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(3)
 
-	// Again, but now due to a staging bundle upload error.
+		// Again, but now due to a staging bundle upload error.
 
-	addEntryExpectFailureWithSeed(t, tl, 'C')
-	addEntryExpectFailureWithSeed(t, tl, 'D')
+		addEntryExpectFailureWithSeed(t, tl, 'C')
+		addEntryExpectFailureWithSeed(t, tl, 'D')
 
-	tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload("staging/", true)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(3)
+		tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload("staging/", true)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(3)
 
-	tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+		tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
 
-	addEntryWithSeed(t, tl, 'C')
-	addEntryWithSeed(t, tl, 'D')
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(5)
+		addEntryWithSeed(t, tl, 'C')
+		addEntryWithSeed(t, tl, 'D')
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(5)
 
-	// Again, but reload the logs after the failed upload.
+		// Again, but reload the logs after the failed upload.
 
-	addEntryExpectFailureWithSeed(t, tl, 'E')
-	addEntryExpectFailureWithSeed(t, tl, 'F')
+		addEntryExpectFailureWithSeed(t, tl, 'E')
+		addEntryExpectFailureWithSeed(t, tl, 'F')
 
-	tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload("staging/", true)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(5)
+		tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload("staging/", true)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(5)
 
-	tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
-	tl = ReloadLogs(t, tl)
-	tl.CheckLog(5)
+		tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+		tl = ReloadLogs(t, tl)
+		tl.CheckLog(5)
 
-	addEntryWithSeed(t, tl, 'E')
-	addEntryWithSeed(t, tl, 'F')
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(7)
+		addEntryWithSeed(t, tl, 'E')
+		addEntryWithSeed(t, tl, 'F')
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(7)
 
-	// If the logs don't progress, the staging path is the same, and no empty
-	// bundle must overwrite the previous one.
+		// If the logs don't progress, the staging path is the same, and no empty
+		// bundle must overwrite the previous one.
 
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(7)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(7)
 
-	tl = ReloadLogs(t, tl)
-	tl.CheckLog(7)
+		tl = ReloadLogs(t, tl)
+		tl.CheckLog(7)
+	})
 }
 
 // TestStagingCollisionDifferentSplit verifies that sequencing survives reaching
@@ -1017,42 +1028,44 @@ func TestStagingCollision(t *testing.T) {
 // produce identical trees and identical staging paths, but different staging
 // bundles when the split falls differently across a tile boundary.
 func TestStagingCollisionDifferentSplit(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	tl.Quiet()
-	addEntryWithSeed(t, tl, 'A')
-	addEntryWithSeed(t, tl, 'B')
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		tl.Quiet()
+		addEntryWithSeed(t, tl, 'A')
+		addEntryWithSeed(t, tl, 'B')
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2)
 
-	// Upload a staging bundle for a tree of size 2 + 300, spanning a tile
-	// boundary, but fail sequencing.
-	for i := uint64(1); i <= 300; i++ {
-		addEntryExpectFailureWithSeed(t, tl, i)
-	}
-	tl.Config.Faults.UpdateCallback = failUpdate(false)
-	sequenceExpectFailure(t, tl)
-	tl.CheckLog(2)
-	tl.Config.Faults.UpdateCallback = nil
-	tl = ReloadLogs(t, tl)
-	tl.CheckLog(2)
+		// Upload a staging bundle for a tree of size 2 + 300, spanning a tile
+		// boundary, but fail sequencing.
+		for i := uint64(1); i <= 300; i++ {
+			addEntryExpectFailureWithSeed(t, tl, i)
+		}
+		tl.Config.Faults.UpdateCallback = failUpdate(false)
+		sequenceExpectFailure(t, tl)
+		tl.CheckLog(2)
+		tl.Config.Faults.UpdateCallback = nil
+		tl = ReloadLogs(t, tl)
+		tl.CheckLog(2)
 
-	// Reach the same tree in two steps, the second of which starts after the
-	// tile boundary and so stages fewer tiles than the failed attempt.
-	for i := uint64(1); i <= 256; i++ {
-		addEntryWithSeed(t, tl, i)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2 + 256)
-	for i := uint64(257); i <= 300; i++ {
-		addEntryWithSeed(t, tl, i)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2 + 300)
+		// Reach the same tree in two steps, the second of which starts after the
+		// tile boundary and so stages fewer tiles than the failed attempt.
+		for i := uint64(1); i <= 256; i++ {
+			addEntryWithSeed(t, tl, i)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2 + 256)
+		for i := uint64(257); i <= 300; i++ {
+			addEntryWithSeed(t, tl, i)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2 + 300)
 
-	tl = ReloadLogs(t, tl)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(2 + 301)
+		tl = ReloadLogs(t, tl)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(2 + 301)
+	})
 }
 
 func sequenceExpectFailure(t *testing.T, tl *TestLogs) {
@@ -1065,33 +1078,34 @@ func sequenceExpectFailure(t *testing.T, tl *TestLogs) {
 }
 
 func TestFatalError(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
-	addEntry(t, tl)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
+		addEntry(t, tl)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
 
-	tl.Config.Faults.UpdateCallback = failUpdate(false)
-	addEntryExpectFailure(t, tl)
+		tl.Config.Faults.UpdateCallback = failUpdate(false)
+		addEntryExpectFailure(t, tl)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	if err := tl.Logs.RunSequencer(ctx, 1*time.Millisecond); !errors.Is(err, lockstep.ErrFatal) {
-		t.Errorf("got error %v, expected fatal error", err)
-	}
-	tl.CheckLog(2)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		if err := tl.Logs.RunSequencer(ctx, 1*time.Millisecond); !errors.Is(err, lockstep.ErrFatal) {
+			t.Errorf("got error %v, expected fatal error", err)
+		}
+		tl.CheckLog(2)
 
-	// Once the sequencer stopped, submissions are rejected.
-	wait := addEntryExpectFailure(t, tl)
-	if _, err := wait(t.Context()); err == nil || !strings.Contains(err.Error(), "sequencer stopped") {
-		t.Errorf("got error %v, expected sequencer stopped", err)
-	}
+		// Once the sequencer stopped, submissions are rejected.
+		if _, err := tl.Logs.AddLeaf(t.Context(), testEntry(0)); err == nil || !strings.Contains(err.Error(), "sequencer stopped") {
+			t.Errorf("got error %v, expected sequencer stopped", err)
+		}
 
-	tl.Config.Faults.UpdateCallback = nil
+		tl.Config.Faults.UpdateCallback = nil
 
-	tl = ReloadLogs(t, tl)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-	tl.CheckLog(3)
+		tl = ReloadLogs(t, tl)
+		addEntry(t, tl)
+		fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+		tl.CheckLog(3)
+	})
 }
 
 // TestBadSignerOutput verifies that checkpoints and subtree signatures returned
@@ -1176,29 +1190,31 @@ func TestBadSignerOutput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tl := NewEmptyTestLogs(t)
-			addEntry(t, tl)
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			tl.CheckLog(1)
+			synctest.Test(t, func(t *testing.T) {
+				tl := NewEmptyTestLogs(t)
+				addEntry(t, tl)
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				tl.CheckLog(1)
 
-			tl.Config.Faults.UpdateResult = func(u lockstep.CheckpointUpdate,
-				ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
-				return tt.result(t, tl, u, ic, ec, st)
-			}
-			addEntryExpectFailure(t, tl)
-			sequenceExpectFailure(t, tl)
-			published := tl.CheckLog(2)
-			if published != [2]int64{1, 1} {
-				t.Errorf("published sizes %v, expected 1", published)
-			}
+				tl.Config.Faults.UpdateResult = func(u lockstep.CheckpointUpdate,
+					ic, ec []byte, st [][]lockstep.SubtreeSignature) ([]byte, []byte, [][]lockstep.SubtreeSignature) {
+					return tt.result(t, tl, u, ic, ec, st)
+				}
+				addEntryExpectFailure(t, tl)
+				sequenceExpectFailure(t, tl)
+				published := tl.CheckLog(2)
+				if published != [2]int64{1, 1} {
+					t.Errorf("published sizes %v, expected 1", published)
+				}
 
-			// The signer did apply the update, so reloading recovers it.
-			tl.Config.Faults.UpdateResult = nil
-			tl = ReloadLogs(t, tl)
-			tl.CheckLog(2)
-			addEntry(t, tl)
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			tl.CheckLog(3)
+				// The signer did apply the update, so reloading recovers it.
+				tl.Config.Faults.UpdateResult = nil
+				tl = ReloadLogs(t, tl)
+				tl.CheckLog(2)
+				addEntry(t, tl)
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				tl.CheckLog(3)
+			})
 		})
 	}
 }
@@ -1210,8 +1226,7 @@ func TestNonFatalError(t *testing.T) {
 	tl.StartSequencer()
 
 	tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload("staging/", false)
-	wait := addEntryExpectFailure(t, tl)
-	if _, err := wait(t.Context()); err == nil {
+	if _, err := tl.Logs.AddLeaf(t.Context(), testEntry(0)); err == nil {
 		t.Error("expected error, got nil")
 	} else if e, ok := errors.AsType[acmeerrors.Error](err); !ok || e.Status() != 500 {
 		t.Errorf("got error %v, expected a 500 problem", err)
@@ -1219,11 +1234,11 @@ func TestNonFatalError(t *testing.T) {
 	tl.CheckLog(0)
 
 	tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
-	wait = addEntry(t, tl)
-	if e, err := wait(t.Context()); err != nil {
-		t.Fatal(err)
-	} else if e.Index != 0 {
-		t.Errorf("got index %d, expected 0", e.Index)
+	e := testEntry(1)
+	se, err := tl.Logs.AddLeaf(t.Context(), e)
+	tl.checkEntry(t, e, true, se, err)
+	if err == nil && se.Index != 0 {
+		t.Errorf("got index %d, expected 0", se.Index)
 	}
 	tl.CheckLog(1)
 }
@@ -1231,26 +1246,27 @@ func TestNonFatalError(t *testing.T) {
 // TestSequencerStopped verifies that when the sequencer exits, entries pending
 // in the pool and later submissions get an error rather than hanging.
 func TestSequencerStopped(t *testing.T) {
-	tl := NewEmptyTestLogs(t)
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLogs(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- tl.Logs.RunSequencer(ctx, time.Hour) }()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- tl.Logs.RunSequencer(ctx, time.Hour) }()
 
-	pending := addEntryExpectFailure(t, tl)
-	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Errorf("got error %v, expected context.Canceled", err)
-	}
+		pending := addEntryExpectFailure(t, tl)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("got error %v, expected context.Canceled", err)
+		}
 
-	if _, err := pending(context.Background()); err == nil || !strings.Contains(err.Error(), "sequencer stopped") {
-		t.Errorf("got error %v, expected sequencer stopped", err)
-	}
-	later := addEntryExpectFailure(t, tl)
-	if _, err := later(context.Background()); err == nil || !strings.Contains(err.Error(), "sequencer stopped") {
-		t.Errorf("got error %v, expected sequencer stopped", err)
-	}
-	tl.CheckLog(0)
+		if _, err := pending(); err == nil || !strings.Contains(err.Error(), "sequencer stopped") {
+			t.Errorf("got error %v, expected sequencer stopped", err)
+		}
+		if _, err := tl.Logs.AddLeaf(t.Context(), testEntry(0)); err == nil || !strings.Contains(err.Error(), "sequencer stopped") {
+			t.Errorf("got error %v, expected sequencer stopped", err)
+		}
+		tl.CheckLog(0)
+	})
 }
 
 func TestSequenceErrors(t *testing.T) {
@@ -1361,92 +1377,94 @@ func TestSequenceErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var tl *TestLogs
-			var expectedSize int64
-			var broken bool
-			breakSeq := func() {
-				tt.breakSeq(tl)
-				broken = true
-			}
-			unbreakSeq := func() {
-				tt.unbreakSeq(tl)
-				broken = false
-			}
-			sequence := func(added int64) {
-				t.Helper()
-				err := tl.Logs.Sequence(t.Context())
-				if broken && tt.expectFatal {
-					if err == nil {
-						t.Error("expected error, got nil")
-					}
-				} else {
-					fatalIfErr(t, err)
+			synctest.Test(t, func(t *testing.T) {
+				var tl *TestLogs
+				var expectedSize int64
+				var broken bool
+				breakSeq := func() {
+					tt.breakSeq(tl)
+					broken = true
 				}
-				if !broken || tt.expectProgress {
-					expectedSize += added
+				unbreakSeq := func() {
+					tt.unbreakSeq(tl)
+					broken = false
 				}
-				tl.CheckLog(expectedSize)
-				if err != nil {
-					if broken {
-						tt.unbreakSeq(tl)
+				sequence := func(added int64) {
+					t.Helper()
+					err := tl.Logs.Sequence(t.Context())
+					if broken && tt.expectFatal {
+						if err == nil {
+							t.Error("expected error, got nil")
+						}
+					} else {
+						fatalIfErr(t, err)
 					}
-					tl = ReloadLogs(t, tl)
-					if broken {
-						tt.breakSeq(tl)
+					if !broken || tt.expectProgress {
+						expectedSize += added
+					}
+					tl.CheckLog(expectedSize)
+					if err != nil {
+						if broken {
+							tt.unbreakSeq(tl)
+						}
+						tl = ReloadLogs(t, tl)
+						if broken {
+							tt.breakSeq(tl)
+						}
 					}
 				}
-			}
 
-			tl = NewEmptyTestLogs(t)
-			for range tileWidth - 2 {
+				tl = NewEmptyTestLogs(t)
+				for range tileWidth - 2 {
+					addEntry(t, tl)
+				}
+				sequence(tileWidth - 2)
+
+				breakSeq()
+				addEntryExpectFailure(t, tl)
+				addEntryExpectFailure(t, tl)
+				addEntryExpectFailure(t, tl)
+				sequence(3)
+
+				// Re-failing the same tile sizes.
+				addEntryExpectFailure(t, tl)
+				addEntryExpectFailure(t, tl)
+				addEntryExpectFailure(t, tl)
+				sequence(3)
+
+				unbreakSeq()
+
+				// Succeeding with the same size that failed.
 				addEntry(t, tl)
-			}
-			sequence(tileWidth - 2)
-
-			breakSeq()
-			addEntryExpectFailure(t, tl)
-			addEntryExpectFailure(t, tl)
-			addEntryExpectFailure(t, tl)
-			sequence(3)
-
-			// Re-failing the same tile sizes.
-			addEntryExpectFailure(t, tl)
-			addEntryExpectFailure(t, tl)
-			addEntryExpectFailure(t, tl)
-			sequence(3)
-
-			unbreakSeq()
-
-			// Succeeding with the same size that failed.
-			addEntry(t, tl)
-			addEntry(t, tl)
-			addEntry(t, tl)
-			sequence(3)
-			if published := tl.CheckLog(expectedSize); published != [2]int64{expectedSize, expectedSize} {
-				t.Errorf("published sizes %v, expected %d", published, expectedSize)
-			}
-
-			tl = NewEmptyTestLogs(t)
-			expectedSize = 0
-			for range tileWidth - 2 {
 				addEntry(t, tl)
-			}
-			sequence(tileWidth - 2)
+				addEntry(t, tl)
+				sequence(3)
+				if published := tl.CheckLog(expectedSize); published != [2]int64{expectedSize, expectedSize} {
+					t.Errorf("published sizes %v, expected %d", published, expectedSize)
+				}
 
-			breakSeq()
-			addEntryExpectFailure(t, tl)
-			addEntryExpectFailure(t, tl)
-			addEntryExpectFailure(t, tl)
-			sequence(3)
+				tl = NewEmptyTestLogs(t)
+				expectedSize = 0
+				for range tileWidth - 2 {
+					addEntry(t, tl)
+				}
+				sequence(tileWidth - 2)
 
-			unbreakSeq()
+				breakSeq()
+				addEntryExpectFailure(t, tl)
+				addEntryExpectFailure(t, tl)
+				addEntryExpectFailure(t, tl)
+				sequence(3)
 
-			// Succeeding with a different set of tiles.
-			addEntry(t, tl)
-			sequence(1)
-			if published := tl.CheckLog(expectedSize); published != [2]int64{expectedSize, expectedSize} {
-				t.Errorf("published sizes %v, expected %d", published, expectedSize)
-			}
+				unbreakSeq()
+
+				// Succeeding with a different set of tiles.
+				addEntry(t, tl)
+				sequence(1)
+				if published := tl.CheckLog(expectedSize); published != [2]int64{expectedSize, expectedSize} {
+					t.Errorf("published sizes %v, expected %d", published, expectedSize)
+				}
+			})
 		})
 	}
 }
@@ -1468,53 +1486,55 @@ func TestReloadLaggingCheckpoint(t *testing.T) {
 		{"Evidence", "evidence/", [2]int64{5, 2}},
 	} {
 		t.Run(side.name, func(t *testing.T) {
-			tl := NewEmptyTestLogs(t)
-			addEntry(t, tl)
-			addEntry(t, tl)
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			tl.CheckLog(2)
+			synctest.Test(t, func(t *testing.T) {
+				tl := NewEmptyTestLogs(t)
+				addEntry(t, tl)
+				addEntry(t, tl)
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				tl.CheckLog(2)
 
-			tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload(side.prefix+"checkpoint", false)
-			for range 3 {
-				addEntryExpectFailure(t, tl)
-			}
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			if published := tl.CheckLog(5); published != side.published {
-				t.Errorf("published sizes %v, expected %v", published, side.published)
-			}
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload(side.prefix+"checkpoint", false)
+				for range 3 {
+					addEntryExpectFailure(t, tl)
+				}
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				if published := tl.CheckLog(5); published != side.published {
+					t.Errorf("published sizes %v, expected %v", published, side.published)
+				}
 
-			// Crash and restart. LoadLogs recovers the tiles from the staging
-			// bundle, and the next round publishes both checkpoints.
-			tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
-			tl = ReloadLogs(t, tl)
-			if published := tl.CheckLog(5); published != side.published {
-				t.Errorf("published sizes %v, expected %v", published, side.published)
-			}
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			if published := tl.CheckLog(5); published != [2]int64{5, 5} {
-				t.Errorf("published sizes %v, expected 5", published)
-			}
+				// Crash and restart. LoadLogs recovers the tiles from the staging
+				// bundle, and the next round publishes both checkpoints.
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+				tl = ReloadLogs(t, tl)
+				if published := tl.CheckLog(5); published != side.published {
+					t.Errorf("published sizes %v, expected %v", published, side.published)
+				}
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				if published := tl.CheckLog(5); published != [2]int64{5, 5} {
+					t.Errorf("published sizes %v, expected 5", published)
+				}
 
-			// Again, but with an empty round before the restart, which uploads
-			// no staging bundle and so leaves the previous one in place.
-			tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload(side.prefix+"checkpoint", false)
-			for range 3 {
-				addEntryExpectFailure(t, tl)
-			}
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			tl.CheckLog(8)
+				// Again, but with an empty round before the restart, which uploads
+				// no staging bundle and so leaves the previous one in place.
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failUpload(side.prefix+"checkpoint", false)
+				for range 3 {
+					addEntryExpectFailure(t, tl)
+				}
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				tl.CheckLog(8)
 
-			tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
-			tl = ReloadLogs(t, tl)
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			if published := tl.CheckLog(8); published != [2]int64{8, 8} {
-				t.Errorf("published sizes %v, expected 8", published)
-			}
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+				tl = ReloadLogs(t, tl)
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				if published := tl.CheckLog(8); published != [2]int64{8, 8} {
+					t.Errorf("published sizes %v, expected 8", published)
+				}
 
-			addEntry(t, tl)
-			fatalIfErr(t, tl.Logs.Sequence(t.Context()))
-			tl.CheckLog(9)
+				addEntry(t, tl)
+				fatalIfErr(t, tl.Logs.Sequence(t.Context()))
+				tl.CheckLog(9)
+			})
 		})
 	}
 }
@@ -1522,45 +1542,45 @@ func TestReloadLaggingCheckpoint(t *testing.T) {
 // TestLocalBackend runs the logs on the real LocalBackend in a temporary
 // directory, across a restart.
 func TestLocalBackend(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	logger := slog.New(testLogHandler(t))
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		dir := t.TempDir()
+		logger := slog.New(testLogHandler(t))
 
-	backend, err := lockstep.NewLocalBackend(ctx, filepath.Join(dir, "data"), logger)
-	fatalIfErr(t, err)
+		backend, err := lockstep.NewLocalBackend(ctx, filepath.Join(dir, "data"), logger)
+		fatalIfErr(t, err)
 
-	config := newTestConfig(t)
-	config.Backend = backend
-	if _, _, err := config.build().Signer.Checkpoints(ctx); !errors.Is(err, lockstep.ErrLogNotFound) {
-		t.Errorf("got error %v, expected ErrLogNotFound", err)
-	}
-	tl := NewEmptyTestLogsWithConfig(t, config)
-	tl.Quiet()
+		config := newTestConfig(t)
+		config.Backend = backend
+		if _, _, err := config.build().Signer.Checkpoints(ctx); !errors.Is(err, lockstep.ErrLogNotFound) {
+			t.Errorf("got error %v, expected ErrLogNotFound", err)
+		}
+		tl := NewEmptyTestLogsWithConfig(t, config)
+		tl.Quiet()
 
-	if err := lockstep.CreateLogs(ctx, tl.Config.build(), nil); !errors.Is(err, lockstep.ErrLogExists) {
-		t.Errorf("got error %v, expected ErrLogExists", err)
-	}
+		if err := lockstep.CreateLogs(ctx, tl.Config.build(), nil); !errors.Is(err, lockstep.ErrLogExists) {
+			t.Errorf("got error %v, expected ErrLogExists", err)
+		}
 
-	for range tileWidth - 1 {
+		for range tileWidth - 1 {
+			addEntry(t, tl)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(ctx))
+		tl.CheckLog(tileWidth - 1)
+		for range 3 {
+			addEntry(t, tl)
+		}
+		fatalIfErr(t, tl.Logs.Sequence(ctx))
+		tl.CheckLog(tileWidth + 2)
+
+		tl = ReloadLogs(t, tl)
+		tl.CheckLog(tileWidth + 2)
 		addEntry(t, tl)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(ctx))
-	tl.CheckLog(tileWidth - 1)
-	for range 3 {
-		addEntry(t, tl)
-	}
-	fatalIfErr(t, tl.Logs.Sequence(ctx))
-	tl.CheckLog(tileWidth + 2)
+		fatalIfErr(t, tl.Logs.Sequence(ctx))
+		if published := tl.CheckLog(tileWidth + 3); published != [2]int64{tileWidth + 3, tileWidth + 3} {
+			t.Errorf("published sizes %v, expected %d", published, tileWidth+3)
+		}
 
-	tl = ReloadLogs(t, tl)
-	tl.CheckLog(tileWidth + 2)
-	addEntry(t, tl)
-	fatalIfErr(t, tl.Logs.Sequence(ctx))
-	if published := tl.CheckLog(tileWidth + 3); published != [2]int64{tileWidth + 3, tileWidth + 3} {
-		t.Errorf("published sizes %v, expected %d", published, tileWidth+3)
-	}
-
-	t.Run("Immutable", func(t *testing.T) {
 		key := "issuance/" + torchwood.TilePath(tlog.Tile{H: torchwood.TileHeight, L: 0, N: 0, W: tileWidth})
 		data, err := backend.Fetch(ctx, key)
 		fatalIfErr(t, err)
@@ -1600,6 +1620,8 @@ func BenchmarkSequencer(b *testing.B) {
 		if i%poolSize == 0 && i != 0 {
 			fatalIfErr(b, tl.Logs.Sequence(context.Background()))
 		}
-		tl.Logs.AddLeaf(context.Background(), testPaddedEntry(uint64(i)))
+		// Pools are only about poolSize entries, as some AddLeaf calls might
+		// not reach the pool before it's sequenced.
+		go tl.Logs.AddLeaf(b.Context(), testPaddedEntry(uint64(i)))
 	}
 }

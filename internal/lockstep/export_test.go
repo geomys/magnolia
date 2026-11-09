@@ -1,6 +1,9 @@
 package lockstep
 
-import "context"
+import (
+	"context"
+	"testing"
+)
 
 var ErrFatal = errFatal
 
@@ -21,11 +24,12 @@ func SetPoolSwapCallback(f func()) {
 
 var seqRunning chan struct{}
 
-func PauseSequencer() {
+func PauseSequencer(t testing.TB) {
 	seqRunning = make(chan struct{})
 	testingOnlyPauseSequencing = func() {
 		<-seqRunning
 	}
+	t.Cleanup(func() { testingOnlyPauseSequencing = nil })
 }
 
 func ResumeSequencer() {
