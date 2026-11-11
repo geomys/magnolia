@@ -282,7 +282,7 @@ func TestFinalizeFiles(t *testing.T) {
 			proof.Cosignatures = append(proof.Cosignatures, mtc.Cosignature{CosignerID: cosignerID, Signature: sig})
 		}
 
-		der, err := mtc.Certificate(tbs, proof)
+		der, err := mtc.Certificate(tbs, mtcProof)
 		if err != nil {
 			t.Fatal(err)
 		}

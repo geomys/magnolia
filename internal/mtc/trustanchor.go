@@ -38,12 +38,7 @@ func ParseTrustAnchorID(s string) (TrustAnchorID, error) {
 		if err != nil || n > math.MaxInt32 {
 			return TrustAnchorID{}, fmt.Errorf("trust anchor ID %q has a component that is too large", s)
 		}
-		// Base 128, most significant group first, with the high bit set on
-		// all bytes except the last one, per X.690, Section 8.20.2.
-		for i := (bits.Len64(n) - 1) / 7; i > 0; i-- {
-			b = append(b, byte(n>>(7*i))|0x80)
-		}
-		b = append(b, byte(n)&0x7f)
+		b = appendComponent(b, int32(n))
 	}
 	id, err := NewTrustAnchorID(b)
 	if err != nil {
@@ -72,6 +67,17 @@ func NewTrustAnchorID(b []byte) (TrustAnchorID, error) {
 		return TrustAnchorID{}, err
 	}
 	return TrustAnchorID{string(b)}, nil
+}
+
+// appendComponent appends the encoding of a component to the binary
+// representation of a trust anchor ID: base 128, most significant group first,
+// with the high bit set on all bytes except the last one, per X.690, Section
+// 8.20.2.
+func appendComponent(b []byte, c int32) []byte {
+	for i := (bits.Len32(uint32(c)) - 1) / 7; i > 0; i-- {
+		b = append(b, byte(c>>(7*i))|0x80)
+	}
+	return append(b, byte(c)&0x7f)
 }
 
 // components decodes the components of the binary representation of a trust

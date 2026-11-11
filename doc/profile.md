@@ -104,3 +104,44 @@ lints are ignored because they don't apply to MTCs or to this profile:
 
 The EV Guidelines and ETSI lint sources are excluded entirely, since the profile
 is not EV and has no qcStatements.
+
+## CA certificate
+
+The CA is represented by an unsigned certificate (RFC 9925), following
+draft-ietf-plants-merkle-tree-certs-07, Section 5.5, mtc-tlog, and CQRP
+§2.4.3.1. It is generated from the configuration and served by the read path at
+`ca.pem`.
+
+| Field | Value |
+| --- | --- |
+| `version` | v3 |
+| `serialNumber` | The CA ID's binary representation, as an integer |
+| `signature` | `id-alg-unsigned`, parameters absent |
+| `issuer` | Same as `subject` |
+| `notBefore` | The day the CA cosigner key was generated, at midnight UTC |
+| `notAfter` | `notBefore` + 3831 days |
+| `subject` | The CA ID as a single `id-rdna-trustAnchorID` attribute |
+| `subjectPublicKeyInfo` | The ML-DSA-44 CA cosigner key |
+| `signatureAlgorithm` | Same as `signature` |
+| `signatureValue` | Empty |
+
+Extensions, in this order:
+
+| Extension | Critical | Value |
+| --- | --- | --- |
+| `keyUsage` | Yes | `keyCertSign`, `cRLSign` |
+| `basicConstraints` | Yes | `cA` TRUE, no `pathLenConstraint` |
+| `subjectKeyIdentifier` | No | The CA ID's binary representation |
+| `id-pe-mtcCertificationAuthority-SHA256` | Yes | `sigAlg` ML-DSA-44, `minSerial` 2^48, `maxSerial` 2^64 − 1 |
+| `id-mtcTlogPrefixURLs` | No | `ReadPrefix + "/issuance"` |
+
+**Validity.** No policy sets the validity of an MTC CA certificate, and the
+BRs' Root CA profile doesn't apply to it. `notAfter` is the latest a CA cosigner
+key can be trusted until after it's generated under CQRP: keys are at
+most 4 years (1461 days) old when submitted (§2.6.3), are included up to a
+quarter (90 days) later, and are then trusted for at most 2280 days (§2.6.2).
+
+**Serial range.** `minSerial` and `maxSerial` are the widest range the
+extension allows. They exist for relying parties to revoke ranges of entries
+and to limit log numbers (MTC draft §7.5), and a relying party's copy of the
+certificate can narrow them. Certificates are only issued from log 1.

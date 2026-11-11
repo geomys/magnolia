@@ -108,6 +108,20 @@ func newTestCosigner(t *testing.T, id string) testCosigner {
 	}
 }
 
+// testCertificate returns the Certificate for a TBSCertificate and a proof.
+func testCertificate(t *testing.T, tbs []byte, p *mtc.Proof) []byte {
+	t.Helper()
+	proof, err := p.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := mtc.Certificate(tbs, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
 func standaloneCert(t *testing.T, tbs []byte, cosigners ...testCosigner) []byte {
 	t.Helper()
 	const index, start, end = 9, 8, 13
@@ -120,12 +134,8 @@ func standaloneCert(t *testing.T, tbs []byte, cosigners ...testCosigner) []byte 
 		}
 		cosignatures = append(cosignatures, mtc.Cosignature{CosignerID: c.ID, Signature: sig})
 	}
-	cert, err := mtc.Certificate(tbs, &mtc.Proof{
+	return testCertificate(t, tbs, &mtc.Proof{
 		Start: start, End: end, InclusionProof: proof, Cosignatures: cosignatures})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cert
 }
 
 // failedLints returns the names of the failed lints in err, or fails the test
@@ -230,10 +240,7 @@ func TestLandmark(t *testing.T) {
 	const index, start, end = 9, 0, 16
 	tbs := testTBS(t, testTemplate(t, mldsa.MLDSA87()))
 	hash, proof := testProof(t, tbs, index, start, end)
-	cert, err := mtc.Certificate(tbs, &mtc.Proof{Start: start, End: end, InclusionProof: proof})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cert := testCertificate(t, tbs, &mtc.Proof{Start: start, End: end, InclusionProof: proof})
 
 	l, err := Landmark([2]Subtree{{Start: start, End: end, Hash: hash}, {Start: 16, End: 18}})
 	if err != nil {

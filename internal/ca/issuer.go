@@ -17,7 +17,6 @@ import (
 	"geomys.org/magnolia/internal/lint"
 	"geomys.org/magnolia/internal/lockstep"
 	"geomys.org/magnolia/internal/mtc"
-	"golang.org/x/crypto/cryptobyte"
 )
 
 // An Issuer is an MTC CA, as defined in draft-ietf-plants-merkle-tree-certs-07,
@@ -230,7 +229,11 @@ func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []s
 		InclusionProof: se.Proof,
 		Cosignatures:   iss.cosignatures(se.Subtree),
 	}
-	cert, err := mtc.Certificate(tbs, proof)
+	proofBytes, err := proof.Bytes()
+	if err != nil {
+		return 0, acmeerrors.Internal("couldn't encode proof: %w", err)
+	}
+	cert, err := mtc.Certificate(tbs, proofBytes)
 	if err != nil {
 		return 0, acmeerrors.Internal("couldn't assemble certificate: %w", err)
 	}
@@ -240,7 +243,7 @@ func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []s
 	}
 
 	_, notAfter := mtc.Validity(issuedAt)
-	standalone, err := marshalStandalone(proof)
+	standalone, err := proof.BytesWithoutSignatures()
 	if err != nil {
 		return 0, acmeerrors.Internal("couldn't encode standalone proof: %w", err)
 	}
@@ -318,7 +321,7 @@ func indexPath(n int64) string {
 // It writes the subtrees files with the standalone cosignatures.
 func (iss *Issuer) subtreesSigned(ctx context.Context, subtrees []*lockstep.SignedSubtree) error {
 	for _, st := range subtrees {
-		b, err := marshalCosignatures(iss.cosignatures(st))
+		b, err := mtc.SignaturesBytes(iss.cosignatures(st))
 		if err != nil {
 			return fmt.Errorf("encoding cosignatures of [%d, %d): %w", st.Start, st.End, err)
 		}
@@ -327,34 +330,4 @@ func (iss *Issuer) subtreesSigned(ctx context.Context, subtrees []*lockstep.Sign
 		}
 	}
 	return nil
-}
-
-// marshalStandalone encodes the fields of an MTCProof before signatures.
-func marshalStandalone(p *mtc.Proof) ([]byte, error) {
-	b := cryptobyte.NewBuilder(nil)
-	b.AddUint16(0) // extensions
-	b.AddUint48(uint64(p.Start))
-	b.AddUint48(uint64(p.End))
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		for _, h := range p.InclusionProof {
-			b.AddBytes(h[:])
-		}
-	})
-	return b.Bytes()
-}
-
-// marshalCosignatures encodes the signatures field of an MTCProof.
-func marshalCosignatures(cs []mtc.Cosignature) ([]byte, error) {
-	b := cryptobyte.NewBuilder(nil)
-	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-		for _, c := range cs {
-			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
-				b.AddBytes(c.CosignerID.Bytes())
-			})
-			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-				b.AddBytes(c.Signature)
-			})
-		}
-	})
-	return b.Bytes()
 }

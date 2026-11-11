@@ -42,6 +42,13 @@ const testSequencingPeriod = time.Hour
 func newTestIssuer(t testing.TB) (*ca.Issuer, ca.IssuerConfig) {
 	t.Helper()
 	config := newTestIssuerConfig(t)
+	return startTestIssuer(t, config), config
+}
+
+// startTestIssuer creates and loads a new issuer from config, and runs its
+// sequencer until the end of the test.
+func startTestIssuer(t testing.TB, config ca.IssuerConfig) *ca.Issuer {
+	t.Helper()
 	if err := ca.CreateIssuer(t.Context(), config); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +65,7 @@ func newTestIssuer(t testing.TB) (*ca.Issuer, ca.IssuerConfig) {
 			t.Errorf("sequencer: %v", err)
 		}
 	})
-	return iss, config
+	return iss
 }
 
 // newTestIssuerConfig returns the configuration of an issuer with a new
@@ -66,8 +73,15 @@ func newTestIssuer(t testing.TB) (*ca.Issuer, ca.IssuerConfig) {
 // The logs are not created.
 func newTestIssuerConfig(t testing.TB) ca.IssuerConfig {
 	t.Helper()
+	return newTestIssuerConfigIn(t, t.TempDir())
+}
+
+// newTestIssuerConfigIn is like newTestIssuerConfig, but the backend is the
+// local directory dir.
+func newTestIssuerConfigIn(t testing.TB, dir string) ca.IssuerConfig {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
-	backend, err := lockstep.NewLocalBackend(t.Context(), t.TempDir(), logger)
+	backend, err := lockstep.NewLocalBackend(t.Context(), dir, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,17 +335,21 @@ func FuzzProofFiles(f *testing.F) {
 			return mtc.CompareCosignerIDs(a.CosignerID, b.CosignerID)
 		})
 
-		der, err := mtc.Certificate(tbs, p)
+		proof, err := p.Bytes()
 		if err != nil {
 			return
 		}
-		standalone, err := ca.MarshalStandalone(p)
+		der, err := mtc.Certificate(tbs, proof)
 		if err != nil {
-			t.Fatalf("marshalStandalone: %v", err)
+			return
 		}
-		cosigs, err := ca.MarshalCosignatures(p.Cosignatures)
+		standalone, err := p.BytesWithoutSignatures()
 		if err != nil {
-			t.Fatalf("marshalCosignatures: %v", err)
+			t.Fatalf("BytesWithoutSignatures: %v", err)
+		}
+		cosigs, err := mtc.SignaturesBytes(p.Cosignatures)
+		if err != nil {
+			t.Fatalf("SignaturesBytes: %v", err)
 		}
 
 		cert, err := x509.ParseCertificate(der)

@@ -77,9 +77,11 @@ func TestLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "magnolia-ca.yaml")
 	if err := os.WriteFile(path, []byte(`
 listen: [":443"]
+readlisten: [":8443"]
 writeprefix: https://ca.example.com/acme
 issuer:
   caid: "66252.99999.1"
+  notbefore: 2026-11-11
   period: 500
 `), 0o600); err != nil {
 		t.Fatal(err)
@@ -90,6 +92,21 @@ issuer:
 	}
 	if c.WritePrefix != "https://ca.example.com/acme" || c.Issuer.CAID != "66252.99999.1" || c.Issuer.Period != 500 {
 		t.Errorf("unexpected config %+v", c)
+	}
+	if len(c.ReadListen) != 1 || c.ReadListen[0] != ":8443" {
+		t.Errorf("unexpected ReadListen %q", c.ReadListen)
+	}
+	if got, err := c.Issuer.NotBeforeDate(); err != nil {
+		t.Error(err)
+	} else if want := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("NotBefore is %v, want %v", got, want)
+	}
+	for _, notBefore := range []string{"", "2026-11-11T12:00:00Z", "2026-11-31", "11/11/2026"} {
+		ic := c.Issuer
+		ic.NotBefore = notBefore
+		if got, err := ic.NotBeforeDate(); err == nil {
+			t.Errorf("NotBefore %q: got %v, want an error", notBefore, got)
+		}
 	}
 
 	if err := os.WriteFile(path, []byte("WritePrefix: https://ca.example.com/acme\n"), 0o600); err != nil {
@@ -126,6 +143,58 @@ func TestSigners(t *testing.T) {
 		t.Errorf("issuance origin is %q", c.IssuanceOrigin())
 	}
 
+	// The read path gets the verifier keys from the configuration instead,
+	// and Signers checks them against the seed.
+	if _, _, err := c.Verifiers(); err == nil {
+		t.Error("Verifiers succeeded without verifier keys")
+	}
+	c.CAVerifierKey = caCosigner.Verifier().String()
+	if _, _, err := c.Verifiers(); err == nil {
+		t.Error("Verifiers succeeded without EvidenceVerifierKey")
+	}
+	c.EvidenceVerifierKey = evidenceLog.Verifier().String()
+	if ca, evidence, err := c.Verifiers(); err != nil {
+		t.Error(err)
+	} else if ca.String() != c.CAVerifierKey || evidence.String() != c.EvidenceVerifierKey {
+		t.Error("Verifiers don't match the signers")
+	}
+	otherSeed := &IssuerConfig{CAID: c.CAID, EvidenceOrigin: c.EvidenceOrigin,
+		Seed: filepath.Join(t.TempDir(), "seed.pem")}
+	if err := GenerateIssuerSeed(otherSeed.Seed, otherSeed.CAID); err != nil {
+		t.Fatal(err)
+	}
+	otherCA, otherEvidence, err := otherSeed.Signers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ ca, evidence string }{
+		{"not a vkey", c.EvidenceVerifierKey},
+		{c.CAVerifierKey, "not a vkey"},
+		{c.EvidenceVerifierKey, c.EvidenceVerifierKey},
+		{c.CAVerifierKey, c.CAVerifierKey},
+	} {
+		other := *c
+		other.CAVerifierKey, other.EvidenceVerifierKey = tt.ca, tt.evidence
+		if _, _, err := other.Verifiers(); err == nil {
+			t.Errorf("Verifiers succeeded with %q and %q", tt.ca, tt.evidence)
+		}
+		if _, _, err := other.Signers(); err == nil {
+			t.Errorf("Signers succeeded with %q and %q", tt.ca, tt.evidence)
+		}
+	}
+	for _, tt := range []struct{ ca, evidence string }{
+		{otherCA.Verifier().String(), c.EvidenceVerifierKey},
+		{c.CAVerifierKey, otherEvidence.Verifier().String()},
+		{otherCA.Verifier().String(), ""},
+		{"", otherEvidence.Verifier().String()},
+	} {
+		other := *c
+		other.CAVerifierKey, other.EvidenceVerifierKey = tt.ca, tt.evidence
+		if _, _, err := other.Signers(); err == nil {
+			t.Errorf("Signers succeeded with the verifier keys of another seed")
+		}
+	}
+
 	caCosigner2, evidenceLog2, err := c.Signers()
 	if err != nil {
 		t.Fatal(err)
@@ -138,6 +207,7 @@ func TestSigners(t *testing.T) {
 	// The evidence log key is bound to its origin.
 	other := *c
 	other.EvidenceOrigin = "read.magnolia.test/66252.99999.1/evidence/2"
+	other.EvidenceVerifierKey = ""
 	caCosigner3, evidenceLog3, err := other.Signers()
 	if err != nil {
 		t.Fatal(err)

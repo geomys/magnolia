@@ -29,7 +29,8 @@ example.
 ## Read path
 
 The `1` path component is the log number. `<date>` is the certificate's
-`notAfter` UTC date as `YYYY-MM-DD`.
+`notAfter` UTC date as `YYYY-MM-DD`. `<start>` is split into groups of three
+digits, like `<N>`.
 
 | URL                                                                              | Description |
 | ---                                                                              | ---         |
@@ -44,12 +45,14 @@ The `1` path component is the log number. `<date>` is the certificate's
 | `https://read.example.com/66252.1/evidence/1/checkpoint`                         | evidence log checkpoint |
 | `https://read.example.com/66252.1/evidence/1/tile/<L>/<N>[.p/<W>]`               | evidence log tiles |
 | `https://read.example.com/66252.1/evidence/1/tile/entries/<N>[.p/<W>]`           | evidence log entry bundles |
+| `https://read.example.com/health`                                                | health check |
+| `https://read.example.com/metrics`                                               | Prometheus metrics |
 
 ## Read path files
 
 The read path serves the files in the issuer's `LocalDirectory`. Paths are
-relative to `ReadPrefix`. In file names, `<index>` is split into groups of
-three digits, like `<N>`.
+relative to `ReadPrefix`. In file names, but not in URLs, `<index>` is also
+split into groups of three digits.
 
 | Path                                            | Files |
 | ---                                             | ---   |

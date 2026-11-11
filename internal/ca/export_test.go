@@ -2,8 +2,6 @@ package ca
 
 import (
 	"time"
-
-	"geomys.org/magnolia/internal/mtc"
 )
 
 func init() {
@@ -14,12 +12,4 @@ func init() {
 
 func IndexPath(n int64) string {
 	return indexPath(n)
-}
-
-func MarshalStandalone(p *mtc.Proof) ([]byte, error) {
-	return marshalStandalone(p)
-}
-
-func MarshalCosignatures(cs []mtc.Cosignature) ([]byte, error) {
-	return marshalCosignatures(cs)
 }

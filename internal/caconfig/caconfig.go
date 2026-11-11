@@ -1,5 +1,6 @@
 // Package caconfig implements the configuration file of magnolia-ca, which is
-// also used by magnolia-keygen to create the keys and logs.
+// also used by magnolia-keygen to create the keys and logs, and by
+// magnolia-read-path to serve them.
 package caconfig
 
 import (
@@ -22,11 +23,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the YAML configuration file of magnolia-ca. Keys are the
-// lowercase field names, such as "writeprefix".
+// Config is the YAML configuration file of magnolia-ca and
+// magnolia-read-path. Keys are the lowercase field names, such as
+// "writeprefix".
 type Config struct {
-	// Listen are the addresses to listen on, e.g. ":443".
+	// Listen are the addresses magnolia-ca listens on, e.g. ":443".
 	Listen []string
+
+	// ReadListen are the addresses magnolia-read-path listens on, e.g. ":443".
+	ReadListen []string
 
 	// ACME configures how the CA automatically obtains certificates for its
 	// HTTPS endpoints. Optional. If missing, the CA will listen for plain HTTP
@@ -75,6 +80,18 @@ type IssuerConfig struct {
 	// Certificate URLs are under it, and the issuance log is served at
 	// ReadPrefix + "/issuance/1". See doc/urls.md.
 	ReadPrefix string
+
+	// CAVerifierKey and EvidenceVerifierKey are the verifier keys of the CA
+	// cosigner and of the evidence log, as printed by magnolia-keygen. They
+	// are required by magnolia-read-path, which doesn't read the Seed. If
+	// set, magnolia-ca and magnolia-keygen check that they match the Seed.
+	CAVerifierKey       string
+	EvidenceVerifierKey string
+
+	// NotBefore is the UTC date the Seed was generated, such as "2026-11-11".
+	// It is the notBefore of the CA certificate served by magnolia-read-path,
+	// which requires it.
+	NotBefore string
 
 	// Seed is the path to the PEM file of the secret seed from which the
 	// private keys of the CA cosigner and of the evidence log are derived.
@@ -206,8 +223,51 @@ func (c *IssuerConfig) SequencingPeriod() time.Duration {
 	return time.Duration(c.Period) * time.Millisecond
 }
 
+// NotBeforeDate returns NotBefore as a time, at midnight UTC.
+func (c *IssuerConfig) NotBeforeDate() (time.Time, error) {
+	if c.NotBefore == "" {
+		return time.Time{}, errors.New("missing NotBefore")
+	}
+	t, err := time.Parse(time.DateOnly, c.NotBefore)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid NotBefore: %w", err)
+	}
+	return t, nil
+}
+
+// Verifiers returns the verifiers of the CA cosigner and of the evidence log,
+// from CAVerifierKey and EvidenceVerifierKey.
+func (c *IssuerConfig) Verifiers() (caCosigner, evidenceLog *torchwood.CosignatureVerifier, err error) {
+	caCosigner, err = parseVerifierKey("CAVerifierKey", c.CAVerifierKey, "oid/1.3.6.1.4.1."+c.CAID)
+	if err != nil {
+		return nil, nil, err
+	}
+	evidenceLog, err = parseVerifierKey("EvidenceVerifierKey", c.EvidenceVerifierKey, c.EvidenceOrigin)
+	if err != nil {
+		return nil, nil, err
+	}
+	return caCosigner, evidenceLog, nil
+}
+
+// parseVerifierKey parses the verifier key in the named field, which must be
+// for a cosigner with the given name.
+func parseVerifierKey(field, vkey, name string) (*torchwood.CosignatureVerifier, error) {
+	if vkey == "" {
+		return nil, fmt.Errorf("missing %s", field)
+	}
+	v, err := torchwood.NewCosignatureVerifier(vkey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", field, err)
+	}
+	if v.Name() != name {
+		return nil, fmt.Errorf("%s is for %q, expected %q", field, v.Name(), name)
+	}
+	return v, nil
+}
+
 // Signers reads the issuer seed, and returns the CA cosigner and the evidence
-// log signer derived from it.
+// log signer derived from it. If CAVerifierKey or EvidenceVerifierKey are set,
+// they must match them.
 func (c *IssuerConfig) Signers() (caCosigner, evidenceLog *torchwood.CosignatureSigner, err error) {
 	switch {
 	case c.CAID == "":
@@ -227,7 +287,30 @@ func (c *IssuerConfig) Signers() (caCosigner, evidenceLog *torchwood.Cosignature
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := checkVerifierKey("CAVerifierKey", c.CAVerifierKey, caCosigner); err != nil {
+		return nil, nil, err
+	}
+	if err := checkVerifierKey("EvidenceVerifierKey", c.EvidenceVerifierKey, evidenceLog); err != nil {
+		return nil, nil, err
+	}
 	return caCosigner, evidenceLog, nil
+}
+
+// checkVerifierKey checks that the verifier key in the named field, if set, is
+// the one of signer.
+func checkVerifierKey(field, vkey string, signer *torchwood.CosignatureSigner) error {
+	if vkey == "" {
+		return nil
+	}
+	want := signer.Verifier()
+	v, err := parseVerifierKey(field, vkey, want.Name())
+	if err != nil {
+		return err
+	}
+	if v.String() != want.String() {
+		return fmt.Errorf("%s doesn't match the seed, expected %s", field, want)
+	}
+	return nil
 }
 
 // cosignatureSigner derives an ML-DSA-44 key from seed, and returns a

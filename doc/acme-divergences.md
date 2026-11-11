@@ -7,6 +7,11 @@ Magnolia diverges from the [RFC 8555] ACME spec in the following ways:
 Magnolia does not support the `ES256` JWS signature algorithm.
 Instead, it only implements the ML-DSA algorithms specified in [RFC 9964].
 
+## [Section 6.3](https://www.rfc-editor.org/info/rfc8555#section-6.3)
+
+Certificates are served to GET requests, instead of returning a 405, and
+POST-as-GET requests are not authenticated.
+
 ## [Section 7.1.2](https://www.rfc-editor.org/info/rfc8555#section-7.1.2)
 
 Account objects do not have the `orders` field.

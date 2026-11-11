@@ -52,7 +52,7 @@ func TestGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	sigSize := mldsa.MLDSA44().SignatureSize()
-	standalone, err := Certificate(tbs, &Proof{
+	standalone, err := certificate(tbs, &Proof{
 		Start: start, End: end,
 		InclusionProof: inclusionProof,
 		Cosignatures: []Cosignature{
@@ -75,7 +75,7 @@ func TestGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	landmark, err := Certificate(tbs, &Proof{
+	landmark, err := certificate(tbs, &Proof{
 		Start: landmarkStart, End: landmarkEnd,
 		InclusionProof: inclusionProof,
 	})
@@ -88,7 +88,11 @@ func TestGolden(t *testing.T) {
 func checkGolden(t *testing.T, name string, der []byte, subtreeHash tlog.Hash) {
 	t.Helper()
 	verifyCertificate(t, der, subtreeHash)
+	compareGolden(t, name, der)
+}
 
+func compareGolden(t *testing.T, name string, der []byte) {
+	t.Helper()
 	path := filepath.Join("testdata", name+".der")
 	if *update {
 		if err := os.WriteFile(path, der, 0o644); err != nil {

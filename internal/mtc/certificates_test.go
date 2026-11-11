@@ -216,6 +216,15 @@ func (b *asn1BitString) read(s *cryptobyte.String) bool {
 	return true
 }
 
+// certificate returns the Certificate for a TBSCertificate and a Proof.
+func certificate(tbs []byte, p *Proof) ([]byte, error) {
+	proof, err := p.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return Certificate(tbs, proof)
+}
+
 func TestCertificateStandalone(t *testing.T) {
 	const index, start, end, size = 9, 8, 13, 13
 	tbs, err := TBSCertificate(testTemplate(t))
@@ -250,7 +259,7 @@ func TestCertificateStandalone(t *testing.T) {
 		cosignatures = append(cosignatures, Cosignature{MustParseTrustAnchorID(c.id), sig})
 	}
 
-	der, err := Certificate(tbs, &Proof{
+	der, err := certificate(tbs, &Proof{
 		Start: start, End: end,
 		InclusionProof: inclusionProof,
 		Cosignatures:   cosignatures,
@@ -305,7 +314,7 @@ func TestCertificateLandmarkRelative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := Certificate(tbs, &Proof{Start: start, End: end, InclusionProof: inclusionProof})
+	der, err := certificate(tbs, &Proof{Start: start, End: end, InclusionProof: inclusionProof})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,9 +372,7 @@ func TestCertificateCosignerOrder(t *testing.T) {
 		{"66252.127", "66252.128"}, // 84854c7f, 84854c8100
 		{"1.1", "66252.0"},
 	} {
-		p := PlaceholderProof()
-		p.Cosignatures = cosignatures(ids...)
-		der, err := Certificate(tbs, p)
+		der, err := certificate(tbs, &Proof{Start: 0, End: 1, Cosignatures: cosignatures(ids...)})
 		if err != nil {
 			t.Errorf("%v: %v", ids, err)
 			continue
@@ -383,10 +390,8 @@ func TestCertificateCosignerOrder(t *testing.T) {
 		{"66252.0.1", "66252.1"},
 		{"66252.128", "66252.127"},
 	} {
-		p := PlaceholderProof()
-		p.Cosignatures = cosignatures(ids...)
-		if _, err := Certificate(tbs, p); err == nil {
-			t.Errorf("%v: Certificate succeeded", ids)
+		if _, err := certificate(tbs, &Proof{Start: 0, End: 1, Cosignatures: cosignatures(ids...)}); err == nil {
+			t.Errorf("%v: certificate succeeded", ids)
 		}
 	}
 }
@@ -425,12 +430,12 @@ func TestCertificateInvalid(t *testing.T) {
 		"missing cosigner ID":  {tbs, &Proof{Start: 0, End: 1, Cosignatures: []Cosignature{{}}}},
 		"signature too long":   {tbs, &Proof{Start: 0, End: 1, Cosignatures: []Cosignature{{MustParseTrustAnchorID("66252.0"), make([]byte, 1<<16)}}}},
 		"inclusion proof long": {tbs, &Proof{Start: 0, End: 1, InclusionProof: make(torchwood.RecordInSubtreeProof, 1<<11)}},
-		"malformed TBS":        {tbs[:len(tbs)-1], PlaceholderProof()},
-		"other log":            {otherLog, PlaceholderProof()},
-		"other signature":      {otherSignature, PlaceholderProof()},
+		"malformed TBS":        {tbs[:len(tbs)-1], &Proof{Start: 0, End: 1}},
+		"other log":            {otherLog, &Proof{Start: 0, End: 1}},
+		"other signature":      {otherSignature, &Proof{Start: 0, End: 1}},
 	} {
-		if _, err := Certificate(tt.tbs, tt.p); err == nil {
-			t.Errorf("%s: Certificate succeeded", name)
+		if _, err := certificate(tt.tbs, tt.p); err == nil {
+			t.Errorf("%s: certificate succeeded", name)
 		}
 	}
 }
