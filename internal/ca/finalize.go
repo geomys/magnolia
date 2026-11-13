@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"net/http"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -51,7 +52,8 @@ func (ca *CA) handleFinalize(payload []byte, r *http.Request) (*response, acmeer
 	// TODO: EvidenceLeaf, a minimal record of the authorizations.
 	evidence := []byte(ca.orderURL(ord))
 	token := certToken()
-	index, err := ca.issuer.issue(r.Context(), pub, ord.dnsIdentifiers, issuedAt, token, evidence)
+	dnsNames, ips := ord.names()
+	index, err := ca.issuer.issue(r.Context(), pub, dnsNames, ips, issuedAt, token, evidence)
 
 	ord.mu.Lock()
 	switch {
@@ -96,16 +98,25 @@ func verifyCSR(ord *order, b64 string, accountKey *mldsa.PublicKey) (*mldsa.Publ
 	if pub.Equal(accountKey) {
 		return nil, acmeerrors.New("badCSR", 400, "CSR public key must not be the account key")
 	}
-	if len(csr.EmailAddresses) != 0 || len(csr.IPAddresses) != 0 || len(csr.URIs) != 0 {
-		return nil, acmeerrors.New("badCSR", 400, "CSR must only request DNS names")
+	if len(csr.EmailAddresses) != 0 || len(csr.URIs) != 0 {
+		return nil, acmeerrors.New("badCSR", 400, "CSR must only request DNS names and IP addresses")
 	}
 	if cn := csr.Subject.CommonName; cn != "" && !slices.Contains(csr.DNSNames, cn) {
 		return nil, acmeerrors.New("badCSR", 400, "CSR common name %q is not one of its DNS names", cn)
 	}
-	got := slices.Compact(slices.Sorted(slices.Values(csr.DNSNames)))
-	want := slices.Sorted(slices.Values(ord.dnsIdentifiers))
+	var got []identifier
+	for _, name := range csr.DNSNames {
+		got = append(got, identifier{Type: "dns", Value: name})
+	}
+	for _, ip := range csr.IPAddresses {
+		addr, _ := netip.AddrFromSlice(ip)
+		got = append(got, identifier{Type: "ip", Value: addr.String()})
+	}
+	slices.SortFunc(got, identifier.compare)
+	got = slices.Compact(got)
+	want := slices.SortedFunc(slices.Values(ord.identifiers), identifier.compare)
 	if !slices.Equal(got, want) {
-		return nil, acmeerrors.New("badCSR", 400, "CSR names %q don't match the order identifiers %q", got, want)
+		return nil, acmeerrors.New("badCSR", 400, "CSR identifiers %v don't match the order identifiers %v", got, want)
 	}
 	return pub, nil
 }

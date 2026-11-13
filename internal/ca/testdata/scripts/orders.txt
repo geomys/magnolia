@@ -83,7 +83,11 @@ payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "dns"
 error == malformed
 
 POST $dir.newOrder
-payload {"identifiers": [{"type": "ip", "value": "192.0.2.1"}]}
+payload {"identifiers": [{"type": "email", "value": "admin@example.org"}]}
+error == unsupportedIdentifier
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "DNS", "value": "www.example.org"}]}
 error == unsupportedIdentifier
 
 POST $dir.newOrder

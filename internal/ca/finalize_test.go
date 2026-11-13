@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"net"
 	"net/http/httptest"
+	"net/netip"
 	"path"
 	"strconv"
 	"strings"
@@ -25,8 +26,8 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 )
 
-// readyOrder creates an account if needed and a ready order for names, and
-// returns the order and finalize URLs.
+// readyOrder creates an account if needed and a ready order for names, which
+// can be DNS names or IP addresses, and returns the order and finalize URLs.
 func readyOrder(t testing.TB, c *acmetest.Client, names ...string) (orderURL, finalizeURL string) {
 	t.Helper()
 	account := c.Key("account")
@@ -38,7 +39,11 @@ func readyOrder(t testing.TB, c *acmetest.Client, names ...string) (orderURL, fi
 	}
 	var ids []string
 	for _, n := range names {
-		ids = append(ids, `{"type":"dns","value":"`+n+`"}`)
+		typ := "dns"
+		if _, err := netip.ParseAddr(n); err == nil {
+			typ = "ip"
+		}
+		ids = append(ids, `{"type":"`+typ+`","value":"`+n+`"}`)
 	}
 	resp := c.Do(&acmetest.Request{Method: "POST", URL: c.URL("newOrder"), Key: account,
 		Payload: []byte(`{"identifiers":[` + strings.Join(ids, ",") + `]}`)})
@@ -127,6 +132,56 @@ func TestFinalizeCSR(t *testing.T) {
 		}, certKey))
 		if status := resp.JSON.(map[string]any)["status"]; status != "valid" {
 			t.Errorf("got %d %s, want valid", resp.StatusCode, resp.Body)
+		}
+	})
+}
+
+// TestFinalizeIP checks that IP identifiers are only matched by IP addresses
+// in the CSR, and are certified as such.
+func TestFinalizeIP(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rt := newReadPathTest(t)
+		c := rt.acme
+		_, finalizeURL := readyOrder(t, c, "example.org", "1.1.1.1", "2606:4700:4700::1111")
+		certKey := c.Key("cert").Priv
+		ips := []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")}
+
+		for _, tt := range []struct {
+			name string
+			csr  *x509.CertificateRequest
+		}{
+			{"IP addresses as DNS names", &x509.CertificateRequest{
+				DNSNames: []string{"example.org", "1.1.1.1", "2606:4700:4700::1111"}}},
+			{"IP address as common name", &x509.CertificateRequest{
+				Subject: pkix.Name{CommonName: "1.1.1.1"}, DNSNames: []string{"example.org"}, IPAddresses: ips}},
+		} {
+			resp := finalize(c, finalizeURL, encodeCSR(t, tt.csr, certKey))
+			if resp.Problem == nil || resp.Problem.Type != "urn:ietf:params:acme:error:badCSR" {
+				t.Errorf("%s: got %d %s, want badCSR", tt.name, resp.StatusCode, resp.Body)
+			}
+		}
+
+		// Addresses can be in any order, and repeated.
+		resp := finalize(c, finalizeURL, encodeCSR(t, &x509.CertificateRequest{
+			DNSNames: []string{"example.org"}, IPAddresses: []net.IP{ips[1], ips[0], ips[1]}}, certKey))
+		if status, _ := resp.JSON.(map[string]any)["status"].(string); status != "valid" {
+			t.Fatalf("got %d %s, want valid", resp.StatusCode, resp.Body)
+		}
+		_, body := rt.get(200, resp.JSON.(map[string]any)["certificate"].(string))
+		der := decodeChain(t, body, "CERTIFICATE")[0]
+		if err := rt.lint.Lint(der); err != nil {
+			t.Error(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(cert.DNSNames, ","); got != "example.org" {
+			t.Errorf("DNS names are %s", got)
+		}
+		if len(cert.IPAddresses) != 2 || !cert.IPAddresses[0].Equal(ips[0]) || !cert.IPAddresses[1].Equal(ips[1]) ||
+			len(cert.IPAddresses[0]) != 4 || len(cert.IPAddresses[1]) != 16 {
+			t.Errorf("IP addresses are %v", cert.IPAddresses)
 		}
 	})
 }

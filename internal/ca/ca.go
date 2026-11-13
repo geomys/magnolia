@@ -245,12 +245,9 @@ func (ca *CA) handleKeyChange(payload []byte, r *http.Request) (*response, acmee
 
 func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeerrors.Error) {
 	var req struct {
-		Identifiers []struct {
-			Type  string `json:"type"`
-			Value string `json:"value"`
-		} `json:"identifiers"`
-		NotBefore *jsontext.Value `json:"notBefore"`
-		NotAfter  *jsontext.Value `json:"notAfter"`
+		Identifiers []identifier    `json:"identifiers"`
+		NotBefore   *jsontext.Value `json:"notBefore"`
+		NotAfter    *jsontext.Value `json:"notAfter"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, acmeerrors.New("malformed", 400, "invalid JSON payload")
@@ -271,22 +268,27 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 		account: r.Context().Value(kidContextKey).(string),
 		created: time.Now(),
 
-		dnsIdentifiers: make([]string, 0, len(req.Identifiers)),
-		authz:          make([]authz, 0, len(req.Identifiers)),
+		identifiers: make([]identifier, 0, len(req.Identifiers)),
+		authz:       make([]authz, 0, len(req.Identifiers)),
 	}
-	seen := make(map[string]bool)
+	seen := make(map[identifier]bool)
 	for _, id := range req.Identifiers {
-		if id.Type != "dns" {
-			return nil, acmeerrors.New("unsupportedIdentifier", 400, "only dns identifiers are supported")
+		if id.Type != "dns" && id.Type != "ip" {
+			return nil, acmeerrors.New("unsupportedIdentifier", 400, "only dns and ip identifiers are supported")
 		}
-		if seen[id.Value] {
+		if seen[id] {
 			return nil, acmeerrors.New("malformed", 400, "duplicate identifier %s", id.Value)
 		}
-		seen[id.Value] = true
+		seen[id] = true
+		if id.Type == "ip" {
+			if err := checkIPIdentifier(id.Value); err != nil {
+				return nil, err
+			}
+		}
 		// TODO: validate the identifier!
 		// TODO: limit the number and length of identifiers, to bound the size
 		// of the log entry, which can't exceed 65535 bytes.
-		ord.dnsIdentifiers = append(ord.dnsIdentifiers, id.Value)
+		ord.identifiers = append(ord.identifiers, id)
 		ord.authz = append(ord.authz, authz{token: rand.Text()})
 	}
 	res := ca.renderOrder(ord)
@@ -364,7 +366,7 @@ func (ca *CA) handleChallenge(payload []byte, r *http.Request) (*response, acmee
 		return nil, err
 	}
 	typ := r.PathValue("type")
-	if typ != "http-01" || strings.HasPrefix(ord.dnsIdentifiers[i], "*.") {
+	if typ != "http-01" || strings.HasPrefix(ord.identifiers[i].Value, "*.") {
 		return nil, acmeerrors.Custom("challengeNotFound", 404, "challenge does not exist")
 	}
 

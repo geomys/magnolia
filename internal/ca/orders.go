@@ -2,6 +2,7 @@ package ca
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -11,10 +12,10 @@ import (
 )
 
 type order struct {
-	id             string
-	account        string
-	created        time.Time
-	dnsIdentifiers []string // with "*." prefix for wildcards
+	id          string
+	account     string
+	created     time.Time
+	identifiers []identifier
 
 	// mu protects err, issuedAt, index, token, and the contents of authz.
 	// len(authz) and copies of authz elements don't require holding mu.
@@ -23,7 +24,7 @@ type order struct {
 	issuedAt time.Time // set when finalization starts
 	index    int64     // != 0 once the order is valid
 	token    string    // random token in the certificate path
-	authz    []authz   // one per dnsIdentifier
+	authz    []authz   // one per identifier
 }
 
 type authz struct {
@@ -68,6 +69,18 @@ func (ord *order) status() (status string, cert *issuedCert, err acmeerrors.Erro
 		}
 	}
 	return status, nil, nil
+}
+
+func (ord *order) names() (dnsNames []string, ips []netip.Addr) {
+	for _, id := range ord.identifiers {
+		switch id.Type {
+		case "dns":
+			dnsNames = append(dnsNames, id.Value)
+		case "ip":
+			ips = append(ips, netip.MustParseAddr(id.Value))
+		}
+	}
+	return dnsNames, ips
 }
 
 func (ord *order) expiry() time.Time {
@@ -122,9 +135,10 @@ func (ca *CA) renderOrder(ord *order) map[string]any {
 	status, cert, ordErr := ord.status()
 
 	j := map[string]any{
-		"status":   status,
-		"expires":  ord.expiry().UTC().Format(time.RFC3339),
-		"finalize": ca.orderURL(ord) + "/finalize",
+		"status":      status,
+		"expires":     ord.expiry().UTC().Format(time.RFC3339),
+		"finalize":    ca.orderURL(ord) + "/finalize",
+		"identifiers": ord.identifiers,
 	}
 
 	authzURLs := make([]string, 0, len(ord.authz))
@@ -132,15 +146,6 @@ func (ca *CA) renderOrder(ord *order) map[string]any {
 		authzURLs = append(authzURLs, ca.authzURL(ord, i))
 	}
 	j["authorizations"] = authzURLs
-
-	ids := make([]map[string]string, 0, len(ord.dnsIdentifiers))
-	for _, id := range ord.dnsIdentifiers {
-		ids = append(ids, map[string]string{
-			"type":  "dns",
-			"value": id,
-		})
-	}
-	j["identifiers"] = ids
 
 	if ordErr != nil {
 		j["error"] = acmeerrors.Render(ordErr)
@@ -157,14 +162,13 @@ func (ca *CA) renderAuthz(ord *order, i int) map[string]any {
 	authz := ord.authz[i]
 	ord.mu.Unlock()
 
-	id, isWildcard := strings.CutPrefix(ord.dnsIdentifiers[i], "*.")
+	id := ord.identifiers[i]
+	value, isWildcard := strings.CutPrefix(id.Value, "*.")
+	id.Value = value
 	j := map[string]any{
-		"status":  authz.authzStatus(),
-		"expires": ord.expiry().UTC().Format(time.RFC3339),
-		"identifier": map[string]string{
-			"type":  "dns",
-			"value": id,
-		},
+		"status":     authz.authzStatus(),
+		"expires":    ord.expiry().UTC().Format(time.RFC3339),
+		"identifier": id,
 	}
 	if isWildcard {
 		j["wildcard"] = true

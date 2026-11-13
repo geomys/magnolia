@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -192,15 +193,16 @@ var issueTimeout = 30 * time.Second
 //
 // Once the entry is added, the certificate is issued regardless of what the
 // client does, so issue doesn't respect the cancellation of ctx.
-func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []string, issuedAt time.Time, token string, evidence []byte) (int64, acmeerrors.Error) {
+func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []string, ips []netip.Addr, issuedAt time.Time, token string, evidence []byte) (int64, acmeerrors.Error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), issueTimeout)
 	defer cancel()
 
 	tbs, err := mtc.TBSCertificate(&mtc.Template{
-		CAID:      iss.caID,
-		IssuedAt:  issuedAt,
-		PublicKey: pub,
-		DNSNames:  dnsNames,
+		CAID:        iss.caID,
+		IssuedAt:    issuedAt,
+		PublicKey:   pub,
+		DNSNames:    dnsNames,
+		IPAddresses: ips,
 	})
 	if err != nil {
 		return 0, acmeerrors.New("rejectedIdentifier", 400, "couldn't build certificate: %w", err)

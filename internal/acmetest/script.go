@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,8 +37,8 @@ import (
 //	sleep <duration>          advance time
 //	key <name> <ML-DSA-65>    create a key with the given parameter set
 //	bind <key> <url>          record that key is the account key at url
-//	csr <name> <key> <dns>... capture as name a base64url-encoded CSR for
-//	                          the DNS names, signed by key
+//	csr <name> <key> <san>... capture as name a base64url-encoded CSR for
+//	                          the DNS names and IP addresses, signed by key
 //
 // Request lines:
 //
@@ -152,7 +153,7 @@ type paragraph struct {
 	sleep time.Duration
 	key   [2]string // name, params
 	bind  [2]string // key, url
-	csr   []string  // name, key, DNS names
+	csr   []string  // name, key, DNS names and IP addresses
 
 	// Request case.
 	method    string // GET, HEAD, POST, POST-as-GET
@@ -272,7 +273,7 @@ func parseScript(file, text string) (*script, error) {
 			case "csr":
 				fields := strings.Fields(args)
 				if len(fields) < 2 {
-					return nil, errorf("usage: csr <name> <key> <dns name>...")
+					return nil, errorf("usage: csr <name> <key> <DNS name or IP address>...")
 				}
 				if reserved[fields[0]] {
 					return nil, errorf("%q is a reserved name", fields[0])
@@ -534,7 +535,15 @@ func (p *paragraph) run(sc *scope) error {
 		if err != nil {
 			return err
 		}
-		sc.captures[name] = sc.c.CSR(k, &x509.CertificateRequest{DNSNames: names})
+		template := &x509.CertificateRequest{}
+		for _, n := range names {
+			if ip, err := netip.ParseAddr(n); err == nil {
+				template.IPAddresses = append(template.IPAddresses, ip.AsSlice())
+			} else {
+				template.DNSNames = append(template.DNSNames, n)
+			}
+		}
+		sc.captures[name] = sc.c.CSR(k, template)
 		return nil
 	}
 

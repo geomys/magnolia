@@ -1,0 +1,161 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+
+# An order can mix IP addresses and DNS names. IP addresses are validated with
+# http-01, like DNS names.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "ip", "value": "1.1.1.1"}, {"type": "ip", "value": "2606:4700:4700::1111"}]}
+$code == 201
+$body.identifiers == [{"type":"dns","value":"example.org"},{"type":"ip","value":"1.1.1.1"},{"type":"ip","value":"2606:4700:4700::1111"}]
+$body.authorizations[2] exists
+$body.authorizations[3] !exists
+capture order = $header.Location
+capture finalize = $body.finalize
+capture authz0 = $body.authorizations[0]
+capture authz1 = $body.authorizations[1]
+capture authz2 = $body.authorizations[2]
+
+POST-as-GET $authz0
+capture chall0 = $body.challenges[0].url
+
+POST-as-GET $authz1
+$body.identifier == {"type":"ip","value":"1.1.1.1"}
+$body.wildcard !exists
+$body.challenges[0].type == http-01
+$body.challenges[1] !exists
+capture chall1 = $body.challenges[0].url
+
+POST-as-GET $authz2
+$body.identifier == {"type":"ip","value":"2606:4700:4700::1111"}
+$body.challenges[0].type == http-01
+capture chall2 = $body.challenges[0].url
+
+POST $chall0
+payload {}
+$body.status == valid
+
+POST $chall1
+payload {}
+$body.status == valid
+
+POST $chall2
+payload {}
+$body.status == valid
+
+# The CSR must request the IP addresses too.
+csr dnsCSR certKey example.org
+
+POST $finalize
+payload {"csr": "$dnsCSR"}
+error == badCSR
+
+csr otherCSR certKey example.org 1.1.1.1 2606:4700:4700::1001
+
+POST $finalize
+payload {"csr": "$otherCSR"}
+error == badCSR
+
+csr goodCSR certKey 2606:4700:4700::1111 example.org 1.1.1.1
+
+POST $finalize
+payload {"csr": "$goodCSR"}
+$body.status == valid
+$body.certificate exists
+
+# An order can be for IP addresses only.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "1.1.1.1"}]}
+$code == 201
+capture finalize = $body.finalize
+capture authz = $body.authorizations[0]
+
+POST-as-GET $authz
+capture chall = $body.challenges[0].url
+
+POST $chall
+payload {}
+$body.status == valid
+
+csr ipCSR certKey 1.1.1.1
+
+POST $finalize
+payload {"csr": "$ipCSR"}
+$body.status == valid
+
+# The same address can't be requested twice.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "1.1.1.1"}, {"type": "ip", "value": "1.1.1.1"}]}
+error == malformed
+
+# Addresses are in dotted decimal or RFC 5952 form, without a zone, and IPv4
+# addresses are not mapped to IPv6.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": ""}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "example.org"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "1.1.1"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "1.1.1.01"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "1.1.1.1/32"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "0x1.1.1.1"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "16843009"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "[2606:4700:4700::1111]"}]}
+error == rejectedIdentifier
+$body.detail contains not valid
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700::1111%eth0"}]}
+error == rejectedIdentifier
+$body.detail contains zone
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700:0:0:0:0:1111"}]}
+error == rejectedIdentifier
+$body.detail contains canonical form 2606:4700:4700::1111
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700::00:1111"}]}
+error == rejectedIdentifier
+$body.detail contains canonical form 2606:4700:4700::1111
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700::ABCD"}]}
+error == rejectedIdentifier
+$body.detail contains canonical form 2606:4700:4700::abcd
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "::ffff:1.1.1.1"}]}
+error == rejectedIdentifier
+$body.detail contains IPv4-mapped
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "::ffff:101:101"}]}
+error == rejectedIdentifier
+$body.detail contains IPv4-mapped

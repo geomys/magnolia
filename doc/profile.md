@@ -78,8 +78,7 @@ with that subject key identifier. Boulder ends up with the same value.
 
 **Subject and SAN.** CQRP requires an empty subject for DV certificates, so
 there is no common name and the SAN extension is critical (RFC 5280
-§4.2.1.6). The profile allows IP addresses, even though the ACME server only
-accepts `dns` identifiers for now.
+§4.2.1.6).
 
 **Key usage.** RFC 9881 allows `digitalSignature` for ML-DSA keys. The BRs only
 define key usage tables for RSA and ECDSA, but recommend the extension.
