@@ -13,3 +13,13 @@ func init() {
 func IndexPath(n int64) string {
 	return indexPath(n)
 }
+
+// Orders returns the number of orders held in memory.
+func (ca *CA) Orders() int {
+	n := 0
+	ca.orders.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}

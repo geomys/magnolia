@@ -30,6 +30,13 @@ func newTestCA(t testing.TB) (http.Handler, string) {
 // newTestCAWithIssuer is like newTestCA, but with the given issuer.
 func newTestCAWithIssuer(t testing.TB, iss *ca.Issuer) http.Handler {
 	t.Helper()
+	return newCA(t, iss).Handler()
+}
+
+// newCA returns a fresh CA with the given issuer. It must be called inside a
+// synctest bubble.
+func newCA(t testing.TB, iss *ca.Issuer) *ca.CA {
+	t.Helper()
 	accounts := filepath.Join(t.TempDir(), "accounts.db")
 	if err := ca.CreateAccounts(accounts); err != nil {
 		t.Fatal(err)
@@ -51,7 +58,7 @@ func newTestCAWithIssuer(t testing.TB, iss *ca.Issuer) http.Handler {
 	// Nonces minted in the same millisecond the CA started are rejected as
 	// too old, and fake time only advances when everything is idle.
 	time.Sleep(time.Millisecond)
-	return c.Handler()
+	return c
 }
 
 // newTestClient returns a client for a fresh CA. It must be called inside a
@@ -65,6 +72,32 @@ func newTestClient(t testing.TB) *acmetest.Client {
 
 func TestScripts(t *testing.T) {
 	acmetest.RunScripts(t, "testdata/scripts", newTestCA)
+}
+
+// TestOrderExpiry checks that orders are dropped from memory when they expire,
+// which is not observable through ACME.
+func TestOrderExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		iss, _ := newTestIssuer(t)
+		c := newCA(t, iss)
+		srv := httptest.NewTestServer(t, c.Handler())
+		client := acmetest.NewClient(t, srv.Client(), directoryURL)
+
+		readyOrder(t, client, "example.org")
+		time.Sleep(2 * time.Hour)
+		readyOrder(t, client, "example.com")
+		if n := c.Orders(); n != 2 {
+			t.Errorf("got %d orders before any expired, want 2", n)
+		}
+		time.Sleep(2 * time.Hour)
+		if n := c.Orders(); n != 1 {
+			t.Errorf("got %d orders after the first expired, want 1", n)
+		}
+		time.Sleep(2 * time.Hour)
+		if n := c.Orders(); n != 0 {
+			t.Errorf("got %d orders after both expired, want 0", n)
+		}
+	})
 }
 
 // TestRequestSize checks the body limit without embedding large bodies in scripts.

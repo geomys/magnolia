@@ -270,6 +270,9 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 		id:      rand.Text(),
 		account: r.Context().Value(kidContextKey).(string),
 		created: time.Now(),
+
+		dnsIdentifiers: make([]string, 0, len(req.Identifiers)),
+		authz:          make([]authz, 0, len(req.Identifiers)),
 	}
 	seen := make(map[string]bool)
 	for _, id := range req.Identifiers {
@@ -289,6 +292,7 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 	res := ca.renderOrder(ord)
 
 	ca.orders.Store(ord.id, ord)
+	time.AfterFunc(time.Until(ord.expiry()), func() { ca.orders.Delete(ord.id) })
 
 	return respond(201, res).WithHeader("Location", ca.orderURL(ord)), nil
 }
