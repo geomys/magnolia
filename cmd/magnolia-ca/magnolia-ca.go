@@ -28,6 +28,7 @@ import (
 	"geomys.org/magnolia/internal/ca"
 	"geomys.org/magnolia/internal/caconfig"
 	"geomys.org/magnolia/internal/lockstep"
+	"geomys.org/magnolia/internal/namelists"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -131,11 +132,22 @@ func main() {
 	if _, err := os.Stat(c.Accounts); err != nil {
 		fatalError(logger, "accounts database must be created with magnolia-keygen", "err", err)
 	}
+	names, err := namelists.Open(namelists.Config{
+		Dir:    c.NameLists,
+		Logger: logger,
+	})
+	if err != nil {
+		fatalError(logger, "failed to open name lists", "err", err)
+	}
+	magnoliaMetrics.MustRegister(names.Metrics()...)
+	go names.Run(ctx)
 	cc, err := ca.New(ca.Config{
 		WritePrefix: c.WritePrefix,
 		NonceKey:    nonceKey,
 		Accounts:    c.Accounts,
 		Issuer:      iss,
+		Names:       names,
+		NoNameLimit: c.NoNameLimit,
 	})
 	if err != nil {
 		fatalError(logger, "failed to create CA", "err", err)

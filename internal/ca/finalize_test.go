@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"net/netip"
@@ -182,6 +183,35 @@ func TestFinalizeIP(t *testing.T) {
 		if len(cert.IPAddresses) != 2 || !cert.IPAddresses[0].Equal(ips[0]) || !cert.IPAddresses[1].Equal(ips[1]) ||
 			len(cert.IPAddresses[0]) != 4 || len(cert.IPAddresses[1]) != 16 {
 			t.Errorf("IP addresses are %v", cert.IPAddresses)
+		}
+	})
+}
+
+// TestFinalizeNameOrder checks that the names in the certificate are in the
+// sequence of the order's identifiers, whatever their sequence in the CSR.
+func TestFinalizeNameOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rt := newReadPathTest(t)
+		c := rt.acme
+		_, finalizeURL := readyOrder(t, c, "www.example.org", "2606:4700:4700::1111", "example.org", "1.1.1.1")
+
+		resp := finalize(c, finalizeURL, encodeCSR(t, &x509.CertificateRequest{
+			DNSNames:    []string{"example.org", "www.example.org"},
+			IPAddresses: []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
+		}, c.Key("cert").Priv))
+		if status, _ := resp.JSON.(map[string]any)["status"].(string); status != "valid" {
+			t.Fatalf("got %d %s, want valid", resp.StatusCode, resp.Body)
+		}
+		_, body := rt.get(200, resp.JSON.(map[string]any)["certificate"].(string))
+		cert, err := x509.ParseCertificate(decodeChain(t, body, "CERTIFICATE")[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(cert.DNSNames, ","); got != "www.example.org,example.org" {
+			t.Errorf("DNS names are %s", got)
+		}
+		if got := fmt.Sprint(cert.IPAddresses); got != "[2606:4700:4700::1111 1.1.1.1]" {
+			t.Errorf("IP addresses are %s", got)
 		}
 	})
 }

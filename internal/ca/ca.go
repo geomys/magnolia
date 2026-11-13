@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"geomys.org/magnolia/internal/acmeerrors"
 	"geomys.org/magnolia/internal/jws"
+	"geomys.org/magnolia/internal/namelists"
 	"geomys.org/magnolia/internal/nonce"
 )
 
@@ -28,13 +30,17 @@ type CA struct {
 	accounts    *accountStore
 	orders      sync.Map // id string => *[order]
 	issuer      *Issuer
+	names       *namelists.Lists
+	noNameLimit bool
 }
 
 type Config struct {
-	WritePrefix string  // e.g. "https://acme.example.com"
-	NonceKey    []byte  // 32 bytes
-	Accounts    string  // SQLite database path, created with [CreateAccounts]
-	Issuer      *Issuer // MTC CA, must run [Issuer.RunSequencer] separately
+	WritePrefix string           // e.g. "https://acme.example.com"
+	NonceKey    []byte           // 32 bytes
+	Accounts    string           // SQLite database path, created with [CreateAccounts]
+	Issuer      *Issuer          // MTC CA, must run [Issuer.RunSequencer] separately
+	Names       *namelists.Lists // must run [namelists.Lists.Run] separately
+	NoNameLimit bool             // disable the 10-identifier limit per order
 }
 
 func New(config Config) (*CA, error) {
@@ -44,6 +50,9 @@ func New(config Config) (*CA, error) {
 	}
 	if config.Issuer == nil {
 		return nil, errors.New("missing Issuer")
+	}
+	if config.Names == nil {
+		return nil, errors.New("missing Names")
 	}
 	issuer, err := nonce.NewIssuer(config.NonceKey)
 	if err != nil {
@@ -59,6 +68,8 @@ func New(config Config) (*CA, error) {
 		nonceSpent:  nonce.NewSpent(issuer, 300_000),
 		accounts:    accounts,
 		issuer:      config.Issuer,
+		names:       config.Names,
+		noNameLimit: config.NoNameLimit,
 	}, nil
 }
 
@@ -262,6 +273,31 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 	if len(req.Identifiers) == 0 {
 		return nil, acmeerrors.New("malformed", 400, "order must include at least one identifier")
 	}
+	if len(req.Identifiers) > maxIdentifiers && !ca.noNameLimit {
+		return nil, acmeerrors.New("malformed", 400, "order has too many identifiers: %d, and the maximum is %d",
+			len(req.Identifiers), maxIdentifiers)
+	}
+
+	hasType := func(typ string) bool {
+		return slices.ContainsFunc(req.Identifiers, func(id identifier) bool { return id.Type == typ })
+	}
+	var tlds *namelists.TLDs
+	var suffixes *namelists.PublicSuffixes
+	var reserved *namelists.ReservedIPs
+	if hasType("dns") {
+		var err error
+		tlds, suffixes, err = ca.names.DNS()
+		if err != nil {
+			return nil, acmeerrors.New("serverInternal", 503, "can't check DNS identifiers: %w", err)
+		}
+	}
+	if hasType("ip") {
+		var err error
+		reserved, err = ca.names.IP()
+		if err != nil {
+			return nil, acmeerrors.New("serverInternal", 503, "can't check IP identifiers: %w", err)
+		}
+	}
 
 	ord := &order{
 		id:      rand.Text(),
@@ -272,24 +308,32 @@ func (ca *CA) handleNewOrder(payload []byte, r *http.Request) (*response, acmeer
 		authz:       make([]authz, 0, len(req.Identifiers)),
 	}
 	seen := make(map[identifier]bool)
+	var rejectedIDs []identifier
+	var rejections []acmeerrors.Error
 	for _, id := range req.Identifiers {
-		if id.Type != "dns" && id.Type != "ip" {
-			return nil, acmeerrors.New("unsupportedIdentifier", 400, "only dns and ip identifiers are supported")
-		}
 		if seen[id] {
 			return nil, acmeerrors.New("malformed", 400, "duplicate identifier %s", id.Value)
 		}
 		seen[id] = true
-		if id.Type == "ip" {
-			if err := checkIPIdentifier(id.Value); err != nil {
-				return nil, err
-			}
+		var err acmeerrors.Error
+		switch id.Type {
+		case "dns":
+			err = checkDNSIdentifier(id.Value, tlds, suffixes)
+		case "ip":
+			err = checkIPIdentifier(id.Value, reserved)
+		default:
+			err = acmeerrors.New("unsupportedIdentifier", 400, "only dns and ip identifiers are supported")
 		}
-		// TODO: validate the identifier!
-		// TODO: limit the number and length of identifiers, to bound the size
-		// of the log entry, which can't exceed 65535 bytes.
+		if err != nil {
+			rejectedIDs = append(rejectedIDs, id)
+			rejections = append(rejections, err)
+			continue
+		}
 		ord.identifiers = append(ord.identifiers, id)
 		ord.authz = append(ord.authz, authz{token: rand.Text()})
+	}
+	if len(rejections) > 0 {
+		return nil, identifiersError(rejectedIDs, rejections)
 	}
 	res := ca.renderOrder(ord)
 

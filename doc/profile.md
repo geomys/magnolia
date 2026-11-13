@@ -42,7 +42,7 @@ In this order:
 | `keyUsage` | Yes | `digitalSignature` |
 | `extKeyUsage` | No | `id-kp-serverAuth` |
 | `authorityKeyIdentifier` | No | `keyIdentifier` only, set to the CA ID's binary representation |
-| `subjectAltName` | Yes | `dNSName`s, then `iPAddress`es |
+| `subjectAltName` | Yes | 1 to 10 names: `dNSName`s, then `iPAddress`es |
 | `certificatePolicies` | No | One `PolicyInformation`, `2.23.140.1.2.1`, no qualifiers |
 
 Nothing else is included. In particular:
@@ -83,8 +83,23 @@ there is no common name and the SAN extension is critical (RFC 5280
 **Key usage.** RFC 9881 allows `digitalSignature` for ML-DSA keys. The BRs only
 define key usage tables for RSA and ECDSA, but recommend the extension.
 
-**Size.** An MTCLogEntry can't exceed 65535 bytes, which bounds the number and
-length of names.
+## Subject alternative names
+
+A certificate has between 1 and 10 names.
+
+A `dNSName` is a Fully-Qualified Domain Name or Wildcard Domain Name (BRs
+§7.1.2.7.12) such that:
+
+- it is lowercase, and at most 253 bytes long, including the `*.` prefix, if present;
+- it has between 2 and 10 labels, not counting the `*` one, if present;
+- each label is a Non-Reserved LDH Label or a P-Label;
+- P-Labels decode to a string in Unicode Normalization Form C;
+- its last label is a top-level domain in the IANA Root Zone Database and is not `arpa`;
+- neither it nor the name after `*.` is a public suffix in the ICANN section
+  of the Public Suffix List (BRs §3.2.2.6).
+
+An `iPAddress` is an IPv4 or IPv6 address that is not in the IANA IPv4 or IPv6
+Special-Purpose Address Registry and is not a multicast address.
 
 ## Linting
 

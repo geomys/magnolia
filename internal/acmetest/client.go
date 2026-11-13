@@ -472,6 +472,32 @@ func (c *Client) checkInvariants(ex *Exchange) {
 		case detail == "":
 			fail("problem document has no detail")
 		}
+		// RFC 8555, Section 6.7.1.
+		if _, ok := obj["identifier"]; ok {
+			fail("top-level problem document has an identifier")
+		}
+		if subproblems, ok := obj["subproblems"]; ok {
+			subs, _ := subproblems.([]any)
+			if len(subs) == 0 {
+				fail("subproblems is not a non-empty array")
+			}
+			for i, sub := range subs {
+				sub, _ := sub.(map[string]any)
+				typ, _ := sub["type"].(string)
+				detail, _ := sub["detail"].(string)
+				id, _ := sub["identifier"].(map[string]any)
+				idType, _ := id["type"].(string)
+				_, hasValue := id["value"].(string)
+				switch {
+				case !strings.HasPrefix(typ, "urn:ietf:params:acme:error:") && !strings.HasPrefix(typ, "https://"):
+					fail("subproblem %d type %q is not an ACME error", i, typ)
+				case detail == "":
+					fail("subproblem %d has no detail", i)
+				case idType == "" || !hasValue:
+					fail("subproblem %d has no identifier", i)
+				}
+			}
+		}
 	case resp.StatusCode/100 == 2:
 		if resp.StatusCode == 204 && len(resp.Body) != 0 {
 			fail("204 response has a body")

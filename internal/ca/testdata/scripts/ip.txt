@@ -88,74 +88,114 @@ POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "1.1.1.1"}, {"type": "ip", "value": "1.1.1.1"}]}
 error == malformed
 
+# A rejected IP address is reported like a rejected DNS name.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "192.0.2.1"}, {"type": "dns", "value": "example.org"}, {"type": "dns", "value": "example.local"}]}
+$code == 400
+error == rejectedIdentifier
+$body.detail contains 192.0.2.1
+$body.detail contains and 1 more
+$body.subproblems[0].type == urn:ietf:params:acme:error:rejectedIdentifier
+$body.subproblems[0].detail contains 192.0.2.0/24
+$body.subproblems[0].identifier == {"type":"ip","value":"192.0.2.1"}
+$body.subproblems[1].identifier == {"type":"dns","value":"example.local"}
+$body.subproblems[2] !exists
+
+# Addresses in the special-purpose registries and multicast addresses are
+# rejected.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "10.1.2.3"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains 10.0.0.0/8
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "::1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains ::1/128
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "2001:db8::1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains 2001:db8::/32
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "224.0.0.1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains multicast
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "ip", "value": "ff02::1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains multicast
+
 # Addresses are in dotted decimal or RFC 5952 form, without a zone, and IPv4
 # addresses are not mapped to IPv6.
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": ""}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "example.org"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "1.1.1"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "1.1.1.01"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "1.1.1.1/32"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "0x1.1.1.1"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "16843009"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "[2606:4700:4700::1111]"}]}
 error == rejectedIdentifier
-$body.detail contains not valid
+$body.subproblems[0].detail contains not valid
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700::1111%eth0"}]}
 error == rejectedIdentifier
-$body.detail contains zone
+$body.subproblems[0].detail contains zone
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700:0:0:0:0:1111"}]}
 error == rejectedIdentifier
-$body.detail contains canonical form 2606:4700:4700::1111
+$body.subproblems[0].detail contains canonical form 2606:4700:4700::1111
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700::00:1111"}]}
 error == rejectedIdentifier
-$body.detail contains canonical form 2606:4700:4700::1111
+$body.subproblems[0].detail contains canonical form 2606:4700:4700::1111
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "2606:4700:4700::ABCD"}]}
 error == rejectedIdentifier
-$body.detail contains canonical form 2606:4700:4700::abcd
+$body.subproblems[0].detail contains canonical form 2606:4700:4700::abcd
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "::ffff:1.1.1.1"}]}
 error == rejectedIdentifier
-$body.detail contains IPv4-mapped
+$body.subproblems[0].detail contains IPv4-mapped
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "ip", "value": "::ffff:101:101"}]}
 error == rejectedIdentifier
-$body.detail contains IPv4-mapped
+$body.subproblems[0].detail contains IPv4-mapped

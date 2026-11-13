@@ -10,6 +10,7 @@ capture finalize = $body.finalize
 capture authz0 = $body.authorizations[0]
 capture authz1 = $body.authorizations[1]
 
+# The CSR can list the names in a different sequence than the order.
 csr goodCSR certKey www.example.org example.org
 
 # A pending order can't be finalized.

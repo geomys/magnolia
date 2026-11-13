@@ -1,0 +1,68 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+// Please pull this list from, and only from https://publicsuffix.org/list/public_suffix_list.dat,
+// rather than any other VCS sites. Pulling from any other URL is not guaranteed to be supported.
+
+// VERSION: 2026-11-12_16-18-22_UTC
+// COMMIT: 4b7a3042da7f7de9bf4600d2e0cf0026d7306fa0
+
+// Instructions on pulling and using this list can be found at https://publicsuffix.org/list/.
+
+// ===BEGIN ICANN DOMAINS===
+
+// This file is an excerpt of the list for tests.
+
+// ck : https://www.iana.org/domains/root/db/ck.html
+*.ck
+!www.ck
+
+// cn : https://www.iana.org/domains/root/db/cn.html
+cn
+com.cn
+公司.cn
+
+// com : https://www.iana.org/domains/root/db/com.html
+com
+
+// io : https://www.nic.io/rules.htm
+io
+com.io
+
+// jp : https://www.iana.org/domains/root/db/jp.html
+jp
+co.jp
+*.kawasaki.jp
+!city.kawasaki.jp
+
+// net : https://www.iana.org/domains/root/db/net.html
+net
+
+// onion : https://www.iana.org/domains/root/db/onion.html
+onion
+
+// org : https://www.iana.org/domains/root/db/org.html
+org
+
+// uk : https://www.iana.org/domains/root/db/uk.html
+uk
+co.uk
+org.uk
+*.sch.uk
+
+// za : https://www.zadna.org.za/content/page/domain-information/
+co.za
+
+// xn--p1ai ("rf", Russian-Cyrillic) : RU
+рф
+
+// ===END ICANN DOMAINS===
+
+// ===BEGIN PRIVATE DOMAINS===
+
+// GitHub, Inc.
+github.io
+*.githubcloudusercontent.com
+
+// ===END PRIVATE DOMAINS===

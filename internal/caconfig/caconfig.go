@@ -62,6 +62,15 @@ type Config struct {
 	// ACME nonces. magnolia-keygen creates it if it doesn't exist.
 	NonceKey string
 
+	// NameLists is the path to the directory where the list of top-level
+	// domains, the Public Suffix List, and the special-purpose address
+	// registries are cached. It will be created if it doesn't already exist.
+	NameLists string
+
+	// NoNameLimit disables the limit of 10 identifiers per order.
+	// It is meant for experiments.
+	NoNameLimit bool
+
 	Issuer IssuerConfig
 }
 

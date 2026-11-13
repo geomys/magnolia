@@ -1,0 +1,348 @@
+POST $dir.newAccount
+payload {}
+$code == 201
+
+# A rejected identifier is reported in the detail and as a subproblem.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "Example.org"}]}
+$code == 400
+error == rejectedIdentifier
+$body.detail contains Example.org
+$body.detail contains not lowercase
+$body.subproblems[0].type == urn:ietf:params:acme:error:rejectedIdentifier
+$body.subproblems[0].detail == DNS name is not lowercase
+$body.subproblems[0].identifier == {"type":"dns","value":"Example.org"}
+$body.subproblems[1] !exists
+
+# Every rejected identifier gets a subproblem, and no order is created.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "dns", "value": "foo_bar.example.org"}, {"type": "dns", "value": "www.example.org"}, {"type": "dns", "value": "example.org."}]}
+$code == 400
+error == rejectedIdentifier
+$header.Location !exists
+$body.detail contains foo_bar.example.org
+$body.detail contains and 1 more
+$body.subproblems[0].identifier.value == foo_bar.example.org
+$body.subproblems[0].detail contains invalid character
+$body.subproblems[1].identifier.value == example.org.
+$body.subproblems[1].detail contains empty label
+$body.subproblems[2] !exists
+
+# Names are made of lowercase letters, digits, hyphens, and dots.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "EXAMPLE.ORG"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains not lowercase
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "exam ple.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains invalid character
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org/"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains invalid character
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org:443"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains invalid character
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example\u0000.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains invalid character
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "b\u00fccher.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains invalid character
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": ""}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains empty
+
+# Labels are not empty, so there is no trailing dot.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": ".example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains empty label
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www..example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains empty label
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.org."}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains empty label
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "."}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains empty label
+
+# Labels are at most 63 bytes and names at most 253, including any wildcard.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains longer than 63 bytes
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains longer than 253 bytes
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains longer than 253 bytes
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.org"}]}
+$code == 201
+
+# Names have between two and ten labels, not counting a wildcard.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains fewer than 2 labels
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains fewer than 2 labels
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "a.a.a.a.a.a.a.a.a.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains more than 10 labels
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "a.a.a.a.a.a.a.a.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.a.a.a.a.a.a.a.a.example.org"}]}
+$code == 201
+
+# Labels do not start or end with a hyphen, and only P-Labels have
+# hyphens in the third and fourth position.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "-www.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains starts or ends with a hyphen
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www-.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains starts or ends with a hyphen
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "ab--cd.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains not a P-Label
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "w-w-w.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "a--b.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "1.example.org"}]}
+$code == 201
+
+# A wildcard is the whole first label.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*."}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains empty label
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "w*.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www.*.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.*.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "**.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard
+
+# IP addresses are not DNS names.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "192.0.2.1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains IP address
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "2001:db8::1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains IP address
+
+# P-Labels are valid Punycode that decodes to Normalization Form C. They
+# don't have to be valid IDNA labels, like the last one, which decodes to an
+# uppercase letter.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "xn--bcher-kva.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www.xn--e1afmkfd.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.xn--mgbh0fb.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "xn--cole-pka.example.org"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "xn--bcher-kva9.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains not valid Punycode
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "xn--ecole-6ed.example.org"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains Normalization Form C
+
+# Names end in a top-level domain of the public DNS.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.local"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains top-level domain
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www.example.internal"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains top-level domain
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.onion"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains top-level domain
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.example.test"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains top-level domain
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "127.1"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains top-level domain
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "192.0.2.1.5"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains top-level domain
+
+# Nothing under .arpa is accepted.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "1.2.0.192.in-addr.arpa"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains under .arpa
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.home.arpa"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains under .arpa
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.example.ip6.arpa"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains under .arpa
+
+# Public suffixes and wildcards for them are rejected, including names
+# that match a wildcard rule of the Public Suffix List.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "co.uk"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains is a public suffix
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.co.uk"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard for a public suffix
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.ck"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains is a public suffix
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.example.ck"}]}
+error == rejectedIdentifier
+$body.subproblems[0].detail contains wildcard for a public suffix
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.co.uk"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.example.co.uk"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "example.uk"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www.ck"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "*.www.ck"}]}
+$code == 201
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "www.example.ck"}]}
+$code == 201
+
+# An order has at most ten identifiers, valid or not.
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "0.example.org"}, {"type": "dns", "value": "1.example.org"}, {"type": "dns", "value": "2.example.org"}, {"type": "dns", "value": "3.example.org"}, {"type": "dns", "value": "4.example.org"}, {"type": "dns", "value": "5.example.org"}, {"type": "dns", "value": "6.example.org"}, {"type": "dns", "value": "7.example.org"}, {"type": "dns", "value": "8.example.org"}, {"type": "dns", "value": "9.example.org"}]}
+$code == 201
+$body.authorizations[9] exists
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "0.example.org"}, {"type": "dns", "value": "1.example.org"}, {"type": "dns", "value": "2.example.org"}, {"type": "dns", "value": "3.example.org"}, {"type": "dns", "value": "4.example.org"}, {"type": "dns", "value": "5.example.org"}, {"type": "dns", "value": "6.example.org"}, {"type": "dns", "value": "7.example.org"}, {"type": "dns", "value": "8.example.org"}, {"type": "dns", "value": "9.example.org"}, {"type": "dns", "value": "10.example.org"}]}
+$code == 400
+error == malformed
+$body.detail contains too many identifiers
+
+POST $dir.newOrder
+payload {"identifiers": [{"type": "dns", "value": "0.example.local"}, {"type": "dns", "value": "1.example.local"}, {"type": "dns", "value": "2.example.local"}, {"type": "dns", "value": "3.example.local"}, {"type": "dns", "value": "4.example.local"}, {"type": "dns", "value": "5.example.local"}, {"type": "dns", "value": "6.example.local"}, {"type": "dns", "value": "7.example.local"}, {"type": "dns", "value": "8.example.local"}, {"type": "dns", "value": "9.example.local"}, {"type": "dns", "value": "10.example.local"}]}
+error == malformed

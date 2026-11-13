@@ -84,11 +84,15 @@ error == malformed
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "email", "value": "admin@example.org"}]}
-error == unsupportedIdentifier
+error == rejectedIdentifier
+$body.subproblems[0].type == urn:ietf:params:acme:error:unsupportedIdentifier
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "dns", "value": "example.org"}, {"type": "DNS", "value": "www.example.org"}]}
-error == unsupportedIdentifier
+error == rejectedIdentifier
+$body.subproblems[0].type == urn:ietf:params:acme:error:unsupportedIdentifier
+$body.subproblems[0].identifier == {"type":"DNS","value":"www.example.org"}
+$body.subproblems[1] !exists
 
 POST $dir.newOrder
 payload {"identifiers": [{"type": "dns", "value": "example.org"}], "notBefore": "2000-01-02T00:00:00Z"}
