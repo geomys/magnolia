@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 // Each CA cosigner key is a separate MTC CA, with its own CA ID, so rotating
 // keys means moving issuance to a new Issuer.
 type Issuer struct {
+	logger     *slog.Logger
 	logs       *lockstep.Logs
 	backend    lockstep.Backend
 	readPrefix *url.URL
@@ -51,6 +53,7 @@ type IssuerConfig struct {
 	ReadPrefix string
 
 	// Logs is the configuration of the issuance and evidence logs.
+	// Its Logger is also used by the Issuer.
 	//
 	// The issuance log origin must be the representation of log 1 of the CA,
 	// such as "oid/1.3.6.1.4.1.66252.1.0.1".
@@ -125,6 +128,7 @@ func newIssuer(c *IssuerConfig) (*Issuer, error) {
 		return nil, err
 	}
 	return &Issuer{
+		logger:     c.Logs.Logger,
 		backend:    c.Logs.Backend,
 		readPrefix: readPrefix,
 		period:     c.SequencingPeriod,
@@ -238,7 +242,8 @@ func (iss *Issuer) issue(ctx context.Context, pub *mldsa.PublicKey, dnsNames []s
 		return 0, acmeerrors.Internal("couldn't assemble certificate: %w", err)
 	}
 	if err := iss.postLint.Lint(cert); err != nil {
-		// TODO: log, increment a metric, and trigger a page alert.
+		// TODO: increment a metric, and trigger a page alert.
+		iss.logger.ErrorContext(ctx, "post-issuance lint failed", "index", se.Index, "err", err)
 		return 0, acmeerrors.Internal("post-issuance lint failed: %w", err)
 	}
 
